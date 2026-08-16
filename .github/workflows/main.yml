@@ -1,0 +1,87 @@
+name: Build Universal iOS TikTok Dylib (iOS 14 - iOS 27)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Advanced Build Environment
+      run: |
+        echo "Configuring environment for modern Xcode and iOS SDK..."
+        xcode-select -p
+        xcrun --sdk iphoneos --show-sdk-path
+
+    - name: Generate Objective-C source (code.m)
+      run: |
+        cat << 'EOF' > code.m
+        #import <UIKit/UIKit.h>
+        #import <Foundation/Foundation.h>
+
+        // Constructor chạy tự động khi dylib được inject
+        __attribute__((constructor)) static void universal_tiktok_offline_ctor(void) {
+            @autoreleasepool {
+                NSString *osVersion = [[UIDevice currentDevice] systemVersion];
+                NSLog(@"[+] TikTok Offline Dylib successfully injected. Running on iOS %@", osVersion);
+                printf("[+] Universal Dylib active on iOS %s\n", [osVersion UTF8String]);
+
+                // Mở rộng logic: Móc vào hệ thống cache mạng (NSURLCache) hoặc xử lý luồng dữ liệu 
+                // để hỗ trợ phát lại video ngoại tuyến từ bộ nhớ đệm cục bộ trên mọi phiên bản iOS.
+            }
+        }
+        EOF
+
+    - name: Compile to Universal iOS dylib (ARM64 / ARM64e)
+      run: |
+        set -e
+        SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+        echo "Using SDK: $SDK"
+
+        # Compile arm64
+        clang -isysroot "$SDK" -arch arm64 \
+          -miphoneos-version-min=14.0 \
+          -O3 \
+          -fobjc-arc \
+          -dynamiclib \
+          -framework Foundation \
+          -framework UIKit \
+          -framework CoreGraphics \
+          -o libtiktokoffline-arm64.dylib \
+          code.m
+
+        # Try to compile arm64e; do not fail the whole job if unsupported on runner/Xcode
+        if clang -isysroot "$SDK" -arch arm64e \
+             -miphoneos-version-min=14.0 \
+             -O3 \
+             -fobjc-arc \
+             -dynamiclib \
+             -framework Foundation \
+             -framework UIKit \
+             -framework CoreGraphics \
+             -o libtiktokoffline-arm64e.dylib \
+             code.m; then
+          echo "arm64e build succeeded, creating universal binary..."
+          lipo -create -output libtiktokoffline.dylib libtiktokoffline-arm64.dylib libtiktokoffline-arm64e.dylib
+        else
+          echo "arm64e build failed or not supported; using arm64 only."
+          mv libtiktokoffline-arm64.dylib libtiktokoffline.dylib
+        fi
+
+        # Check artifact
+        echo "=== BUILD ARTIFACT INFO ==="
+        ls -lh libtiktokoffline.dylib || true
+        file libtiktokoffline.dylib || true
+        lipo -info libtiktokoffline.dylib || true
+
+    - name: Upload Universal Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: universal-tiktok-offline-dylib
+        path: libtiktokoffline.dylib
