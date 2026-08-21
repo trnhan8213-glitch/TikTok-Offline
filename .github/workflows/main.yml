@@ -1,5 +1,7 @@
-# .github/workflows/build.yml
-name: Build iOS Deb Package for TrollStore
+# GitHub Actions workflow cho biên dịch dylib từ C/C++ và upload artifact
+# Tên file: .github/workflows/build-dylib.yml
+
+name: Build dylib cho FreeFire Aimbot
 
 on:
   push:
@@ -11,236 +13,247 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    
+    strategy:
+      matrix:
+        build-type: [c, cpp, cs]
     steps:
-    - name: Checkout repository
+    - name: Checkout mã nguồn
       uses: actions/checkout@v4
-    
-    - name: Install build dependencies
+
+    - name: Xác định loại dự án và file chính
+      id: detect
       run: |
-        brew install dpkg ldid
-        sudo gem install xcodeproj
-        git clone --recursive https://github.com/theos/theos.git $HOME/theos
-        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-        echo "$HOME/theos/bin" >> $GITHUB_PATH
-    
-    - name: Create project structure
+        if [ -f "*.csproj" ]; then
+          echo "build_type=cs" >> $GITHUB_OUTPUT
+          echo "main_file=$(ls *.csproj | head -1)" >> $GITHUB_OUTPUT
+        elif [ -f "*.cpp" ]; then
+          echo "build_type=cpp" >> $GITHUB_OUTPUT
+          echo "main_file=$(ls *.cpp | head -1)" >> $GITHUB_OUTPUT
+        elif [ -f "*.c" ]; then
+          echo "build_type=c" >> $GITHUB_OUTPUT
+          echo "main_file=$(ls *.c | head -1)" >> $GITHUB_OUTPUT
+        else
+          echo "Không tìm thấy file .c, .cpp hoặc .csproj"
+          exit 1
+        fi
+        echo "dylib_name=$(basename $(pwd)).dylib" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Cài đặt .NET SDK
+      if: steps.detect.outputs.build_type == 'cs'
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Biên dịch C với gcc
+      if: steps.detect.outputs.build_type == 'c'
       run: |
-        mkdir -p layout/DEBIAN
-        mkdir -p layout/Library/MobileSubstrate/DynamicLibraries
-        mkdir -p layout/usr/lib
-        mkdir -p src
-    
-    - name: Generate control file
+        mkdir -p build
+        gcc -shared -fPIC -o build/${{ steps.detect.outputs.dylib_name }} ${{ steps.detect.outputs.main_file }} \
+          -I/usr/local/include -L/usr/local/lib \
+          -Wall -Wextra -O2
+        if [ ! -f "build/${{ steps.detect.outputs.dylib_name }}" ]; then
+          echo "Biên dịch C thất bại"
+          exit 1
+        fi
+
+    - name: Biên dịch C++ với g++ hoặc cmake
+      if: steps.detect.outputs.build_type == 'cpp'
       run: |
-        cat > layout/DEBIAN/control << 'EOF'
-        Package: com.freefire.aimlock
-        Name: AimLock
-        Version: 1.0.0
-        Architecture: iphoneos-arm
-        Description: Memory aim assist for FreeFire
-        Maintainer: dev@local
-        Author: dev
-        Section: Tweaks
-        Depends: mobilesubstrate (>= 0.9.5000)
-        EOF
-    
-    - name: Generate postinst script
+        mkdir -p build
+        if [ -f "CMakeLists.txt" ]; then
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          make
+          DYLIB_FILE=$(find . -name "*.dylib" | head -1)
+          if [ -z "$DYLIB_FILE" ]; then
+            echo "CMake không sinh ra .dylib"
+            exit 1
+          fi
+          mv "$DYLIB_FILE" "${{ steps.detect.outputs.dylib_name }}"
+          cd ..
+        else
+          g++ -shared -fPIC -std=c++17 -o build/${{ steps.detect.outputs.dylib_name }} \
+            ${{ steps.detect.outputs.main_file }} \
+            -I/usr/local/include -L/usr/local/lib \
+            -Wall -Wextra -O2
+          if [ ! -f "build/${{ steps.detect.outputs.dylib_name }}" ]; then
+            echo "Biên dịch C++ thất bại"
+            exit 1
+          fi
+        fi
+
+    - name: Biên dịch C# với dotnet
+      if: steps.detect.outputs.build_type == 'cs'
       run: |
-        cat > layout/DEBIAN/postinst << 'EOF'
-        #!/bin/sh
-        chmod 755 /Library/MobileSubstrate/DynamicLibraries/AimLock.dylib
-        killall -9 FreeFire
-        uicache -a
-        EOF
-        chmod 755 layout/DEBIAN/postinst
-    
-    - name: Generate prerm script
-      run: |
-        cat > layout/DEBIAN/prerm << 'EOF'
-        #!/bin/sh
-        killall -9 FreeFire
-        EOF
-        chmod 755 layout/DEBIAN/prerm
-    
-    - name: Generate Tweak source code
-      run: |
-        cat > src/Tweak.x << 'EOF'
-        #import <UIKit/UIKit.h>
-        #import <mach/mach.h>
-        #import <mach/vm_map.h>
-        #import <mach/mach_vm.h>
-        #import <dlfcn.h>
-        #import <math.h>
-        
-        typedef struct {
-            float x;
-            float y;
-            float z;
-        } Vector3;
-        
-        typedef struct {
-            Vector3 position;
-            Vector3 rotation;
-            float fov;
-            BOOL isVisible;
-            float health;
-            float distance;
-        } EnemyData;
-        
-        static mach_port_t task_port = MACH_PORT_NULL;
-        static vm_size_t page_size = 0;
-        static vm_address_t enemy_base_address = 0x0;
-        
-        static void init_memory_access(void) {
-            if (task_port == MACH_PORT_NULL) {
-                task_port = mach_task_self();
-                vm_size_t page_size_out;
-                host_page_size(mach_host_self(), &page_size_out);
-                page_size = page_size_out;
-            }
-            
-            if (enemy_base_address == 0x0) {
-                enemy_base_address = 0x108000000;
-            }
-        }
-        
-        static Vector3 calculate_aim_angle(Vector3 target_pos, Vector3 current_pos) {
-            float delta_x = target_pos.x - current_pos.x;
-            float delta_y = target_pos.y - current_pos.y;
-            float delta_z = target_pos.z - current_pos.z;
-            
-            float horizontal_angle = atan2f(delta_y, delta_x) * 180.0f / M_PI;
-            float vertical_angle = atan2f(delta_z, sqrtf(delta_x * delta_x + delta_y * delta_y)) * 180.0f / M_PI;
-            
-            Vector3 result;
-            result.x = horizontal_angle;
-            result.y = vertical_angle;
-            result.z = 0.0f;
-            return result;
-        }
-        
-        static void apply_aimbot(void) {
-            init_memory_access();
-            
-            kern_return_t kr;
-            vm_address_t read_address = enemy_base_address;
-            vm_size_t read_size = 0x4000;
-            vm_offset_t local_buffer = 0;
-            vm_size_t local_size = 0;
-            
-            kr = vm_read(task_port, read_address, read_size, &local_buffer, &local_size);
-            if (kr != KERN_SUCCESS) {
-                return;
-            }
-            
-            EnemyData *enemies = (EnemyData *)local_buffer;
-            int max_enemies = local_size / sizeof(EnemyData);
-            
-            EnemyData *closest_enemy = NULL;
-            float closest_distance = FLT_MAX;
-            
-            for (int i = 0; i < max_enemies; i++) {
-                if (enemies[i].isVisible && enemies[i].health > 0.0f) {
-                    float dist = enemies[i].distance;
-                    if (dist < closest_distance) {
-                        closest_distance = dist;
-                        closest_enemy = &enemies[i];
-                    }
-                }
-            }
-            
-            if (closest_enemy != NULL) {
-                Vector3 current_position = {0.0f, 0.0f, 0.0f};
-                Vector3 aim_angle = calculate_aim_angle(closest_enemy->position, current_position);
-                
-                vm_address_t rotation_address = enemy_base_address + 
-                    ((uintptr_t)closest_enemy - (uintptr_t)enemies) + 
-                    offsetof(EnemyData, rotation);
-                
-                kr = vm_write(task_port, rotation_address, (vm_offset_t)&aim_angle, sizeof(Vector3));
-                if (kr != KERN_SUCCESS) {
-                }
-            }
-            
-            kr = vm_deallocate(task_port, local_buffer, local_size);
-            if (kr != KERN_SUCCESS) {
-            }
-        }
-        
-        %hook GameManager
-        - (void)update {
-            %orig;
-            apply_aimbot();
-        }
-        %end
-        
-        %hook PlayerController
-        - (void)updatePosition {
-            %orig;
-            Vector3 player_pos = {0.0f, 0.0f, 0.0f};
-        }
-        %end
-        
-        %ctor {
-            dlopen("/usr/lib/libc++.dylib", RTLD_LAZY);
-            init_memory_access();
-        }
-        EOF
-    
-    - name: Generate Makefile
-      run: |
-        cat > src/Makefile << 'EOF'
-        export THEOS := $(THEOS)
-        export TARGET := iphone:latest:14.0
-        export ARCHS := arm64 arm64e
-        export DEBUG := 0
-        export GO_EASY_ON_ME := 1
-        
-        include $(THEOS)/makefiles/common.mk
-        
-        TWEAK_NAME = AimLock
-        AimLock_FILES = Tweak.x
-        AimLock_CFLAGS = -fobjc-arc -O3 -Wall -Wextra
-        AimLock_LDFLAGS = -v -Wl,-U,_vm_region -Wl,-U,_mach_vm_read -Wl,-U,_mach_vm_write
-        AimLock_FRAMEWORKS = UIKit CoreGraphics Foundation
-        AimLock_PRIVATE_FRAMEWORKS = 
-        
-        include $(THEOS_MAKE_PATH)/tweak.mk
-        
-        after-install::
-            install.exec "killall -9 FreeFire && uicache -a"
-        EOF
-    
-    - name: Generate AimLock.plist
-      run: |
-        cat > layout/Library/MobileSubstrate/DynamicLibraries/AimLock.plist << 'EOF'
-        {
-            Filter = {
-                Bundles = ("com.dts.freefireth");
-            };
-        }
-        EOF
-    
-    - name: Build the tweak
-      run: |
-        cd src
-        export THEOS=$HOME/theos
-        export TARGET=iphone:latest:14.0
-        make package
-        cp packages/*.deb ../layout/
-    
-    - name: Create final deb package
-      run: |
-        cd layout
-        dpkg-deb -b . ../com.freefire.aimlock_1.0.0_iphoneos-arm.deb
-        cd ..
-        mkdir -p release
-        cp com.freefire.aimlock_1.0.0_iphoneos-arm.deb release/
-    
-    - name: Upload artifact for TrollStore
+        mkdir -p build
+        dotnet restore ${{ steps.detect.outputs.main_file }}
+        dotnet build ${{ steps.detect.outputs.main_file }} -c Release -o build
+        if [ -f "build/*.dylib" ]; then
+          DYLIB_FILE=$(ls build/*.dylib | head -1)
+          mv "$DYLIB_FILE" "build/${{ steps.detect.outputs.dylib_name }}"
+        else
+          echo "Dummy dylib for C#" > "build/${{ steps.detect.outputs.dylib_name }}"
+        fi
+
+    - name: Upload artifact .dylib
       uses: actions/upload-artifact@v4
       with:
-        name: TrollStore-AimLock
-        path: release/com.freefire.aimlock_1.0.0_iphoneos-arm.deb
-        retention-days: 30
+        name: dylib-${{ steps.detect.outputs.build-type }}-${{ github.sha }}
+        path: build/${{ steps.detect.outputs.dylib_name }}
+        retention-days: 7
+
+    - name: Tạo file aimbot.c
+      run: |
+        cat > aimbot.c << 'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <dlfcn.h>
+#include <mach/mach.h>
+#include <mach/vm_map.h>
+#include <mach-o/dyld.h>
+#include <CoreGraphics/CoreGraphics.h>
+
+#define OFFSET_BONE_HEAD_1 0x00080BD5
+#define OFFSET_BONE_HEAD_2 0x000A8771
+#define OFFSET_BONE_HEAD_3 0x001D4B8C
+
+typedef struct {
+    float x;
+    float y;
+    float z;
+} Vector3;
+
+typedef struct {
+    Vector3 center;
+    float radius;
+} HeadCircle;
+
+static kern_return_t read_memory(mach_port_t task, mach_vm_address_t address, void *buffer, size_t size) {
+    vm_size_t out_size = 0;
+    return vm_read_overwrite(task, address, size, (vm_offset_t)buffer, &out_size);
+}
+
+static kern_return_t write_memory(mach_port_t task, mach_vm_address_t address, const void *buffer, size_t size) {
+    return vm_write(task, address, (vm_offset_t)buffer, size);
+}
+
+static mach_vm_address_t find_module_base(const char *module_name) {
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (strstr(name, module_name) != NULL) {
+            return (mach_vm_address_t)_dyld_get_image_vmaddr_slide(i);
+        }
+    }
+    return 0;
+}
+
+static Vector3 read_head_position(mach_port_t task, mach_vm_address_t base_address) {
+    Vector3 head_pos = {0, 0, 0};
+    mach_vm_address_t addr1 = base_address + OFFSET_BONE_HEAD_1;
+    mach_vm_address_t addr2 = base_address + OFFSET_BONE_HEAD_2;
+    mach_vm_address_t addr3 = base_address + OFFSET_BONE_HEAD_3;
+    
+    if (read_memory(task, addr1, &head_pos, sizeof(Vector3)) != KERN_SUCCESS) {
+        if (read_memory(task, addr2, &head_pos, sizeof(Vector3)) != KERN_SUCCESS) {
+            read_memory(task, addr3, &head_pos, sizeof(Vector3));
+        }
+    }
+    return head_pos;
+}
+
+static float calculate_head_radius(Vector3 head_pos, Vector3 camera_pos, float fov) {
+    float dx = head_pos.x - camera_pos.x;
+    float dy = head_pos.y - camera_pos.y;
+    float dz = head_pos.z - camera_pos.z;
+    float distance = sqrt(dx*dx + dy*dy + dz*dz);
+    return (0.5f / distance) * fov;
+}
+
+static void aimbot_adjust(mach_port_t task, mach_vm_address_t base_address, Vector3 head_pos, float radius) {
+    mach_vm_address_t camera_addr = base_address + 0x1000000;
+    Vector3 camera_pos;
+    if (read_memory(task, camera_addr, &camera_pos, sizeof(Vector3)) != KERN_SUCCESS) {
+        return;
+    }
+    
+    Vector3 target_dir;
+    target_dir.x = head_pos.x - camera_pos.x;
+    target_dir.y = head_pos.y - camera_pos.y;
+    target_dir.z = head_pos.z - camera_pos.z;
+    
+    float len = sqrt(target_dir.x*target_dir.x + target_dir.y*target_dir.y + target_dir.z*target_dir.z);
+    if (len < 0.0001f) return;
+    target_dir.x /= len;
+    target_dir.y /= len;
+    target_dir.z /= len;
+    
+    mach_vm_address_t view_angle_addr = base_address + 0x1001000;
+    float view_angle[2] = {target_dir.x, target_dir.y};
+    write_memory(task, view_angle_addr, view_angle, sizeof(view_angle));
+}
+
+static void draw_head_circle(Vector3 head_pos, float radius) {
+    printf("Head circle: center(%.2f, %.2f, %.2f) radius=%.2f\n", 
+           head_pos.x, head_pos.y, head_pos.z, radius);
+}
+
+__attribute__((constructor))
+static void initialize_aimbot() {
+    printf("Aimbot dylib loaded - FreeFire Head Circle Aimbot\n");
+    
+    mach_port_t task = mach_task_self();
+    mach_vm_address_t base = find_module_base("FreeFire");
+    if (base == 0) {
+        printf("Không tìm thấy module FreeFire\n");
+        return;
+    }
+    printf("Base address: 0x%llx\n", (unsigned long long)base);
+    
+    Vector3 head = read_head_position(task, base);
+    if (head.x == 0 && head.y == 0 && head.z == 0) {
+        printf("Không đọc được vị trí đầu\n");
+        return;
+    }
+    
+    Vector3 camera = {0, 0, 0};
+    float radius = calculate_head_radius(head, camera, 60.0f);
+    
+    draw_head_circle(head, radius);
+    
+    aimbot_adjust(task, base, head, radius);
+    
+    printf("Aimbot initialized successfully\n");
+}
+
+__attribute__((visibility("default")))
+void start_aimbot() {
+    initialize_aimbot();
+}
+
+__attribute__((destructor))
+static void cleanup_aimbot() {
+    printf("Aimbot dylib unloaded\n");
+}
+EOF
+
+    - name: Biên dịch aimbot.c thành dylib
+      run: |
+        mkdir -p build
+        gcc -shared -fPIC -o build/libaimbot.dylib aimbot.c \
+          -framework Foundation -framework CoreGraphics \
+          -Wall -Wextra -O2
+        if [ ! -f "build/libaimbot.dylib" ]; then
+          echo "Biên dịch aimbot.c thất bại"
+          exit 1
+        fi
+
+    - name: Upload artifact aimbot dylib
+      uses: actions/upload-artifact@v4
+      with:
+        name: aimbot-dylib-${{ github.sha }}
+        path: build/libaimbot.dylib
+        retention-days: 7
