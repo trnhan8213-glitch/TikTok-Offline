@@ -89,7 +89,6 @@ jobs:
         
         int find_game_module(void **base_address, size_t *module_size) {
             int ret = -1;
-            const char *executable_path = NULL;
             uint32_t image_count = _dyld_image_count();
             
             for (uint32_t i = 0; i < image_count; i++) {
@@ -401,16 +400,16 @@ jobs:
         all: $(BUILD_DIR) $(TARGET)
         
         $(BUILD_DIR):
-            mkdir -p $(BUILD_DIR)
+        \tmkdir -p $(BUILD_DIR)
         
         $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
-            $(CC) $(CFLAGS) -c $< -o $@
+        \t$(CC) $(CFLAGS) -c $< -o $@
         
         $(TARGET): $(OBJECTS)
-            $(CC) $(CFLAGS) $(OBJECTS) $(LDFLAGS) -o $@
+        \t$(CC) $(CFLAGS) $(OBJECTS) $(LDFLAGS) -o $@
         
         clean:
-            rm -rf $(BUILD_DIR) $(TARGET)
+        \trm -rf $(BUILD_DIR) $(TARGET)
         
         .PHONY: all clean
         EOF
