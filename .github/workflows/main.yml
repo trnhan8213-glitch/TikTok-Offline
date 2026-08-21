@@ -1,10 +1,12 @@
-name: Build iOS Dynamic Library for FreeFire Aimlock
+# .github/workflows/build.yml
+name: Build iOS Deb Package for TrollStore
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -14,32 +16,62 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     
-    - name: Install Xcode Command Line Tools
+    - name: Install build dependencies
       run: |
-        sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
-        xcode-select --install || true
+        brew install dpkg ldid
+        sudo gem install xcodeproj
+        git clone --recursive https://github.com/theos/theos.git $HOME/theos
+        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+        echo "$HOME/theos/bin" >> $GITHUB_PATH
     
-    - name: Create directory structure
+    - name: Create project structure
       run: |
-        mkdir -p src include build
+        mkdir -p layout/DEBIAN
+        mkdir -p layout/Library/MobileSubstrate/DynamicLibraries
+        mkdir -p layout/usr/lib
+        mkdir -p src
     
-    - name: Create header file with offsets
+    - name: Generate control file
       run: |
-        cat > include/aimlock.h << 'EOF'
-        #ifndef AIMLOCK_H
-        #define AIMLOCK_H
-        
-        #include <stdint.h>
-        
-        #define OFFSET_ENTITY_LIST         0xFE90D808
-        #define OFFSET_LOCAL_PLAYER        0x28
-        #define OFFSET_ENTITY_COUNT        0x99
-        #define OFFSET_PLAYER_POS_X        0x80
-        #define OFFSET_PLAYER_POS_Y        0x98
-        #define OFFSET_PLAYER_POS_Z        0x80
-        #define OFFSET_ENEMY_TEAM          0xBE
-        #define OFFSET_ENEMY_HEALTH        0x88
-        #define OFFSET_VIEW_ANGLE          0xDE
+        cat > layout/DEBIAN/control << 'EOF'
+        Package: com.freefire.aimlock
+        Name: AimLock
+        Version: 1.0.0
+        Architecture: iphoneos-arm
+        Description: Memory aim assist for FreeFire
+        Maintainer: dev@local
+        Author: dev
+        Section: Tweaks
+        Depends: mobilesubstrate (>= 0.9.5000)
+        EOF
+    
+    - name: Generate postinst script
+      run: |
+        cat > layout/DEBIAN/postinst << 'EOF'
+        #!/bin/sh
+        chmod 755 /Library/MobileSubstrate/DynamicLibraries/AimLock.dylib
+        killall -9 FreeFire
+        uicache -a
+        EOF
+        chmod 755 layout/DEBIAN/postinst
+    
+    - name: Generate prerm script
+      run: |
+        cat > layout/DEBIAN/prerm << 'EOF'
+        #!/bin/sh
+        killall -9 FreeFire
+        EOF
+        chmod 755 layout/DEBIAN/prerm
+    
+    - name: Generate Tweak source code
+      run: |
+        cat > src/Tweak.x << 'EOF'
+        #import <UIKit/UIKit.h>
+        #import <mach/mach.h>
+        #import <mach/vm_map.h>
+        #import <mach/mach_vm.h>
+        #import <dlfcn.h>
+        #import <math.h>
         
         typedef struct {
             float x;
@@ -48,391 +80,167 @@ jobs:
         } Vector3;
         
         typedef struct {
-            float pitch;
-            float yaw;
-        } ViewAngle;
+            Vector3 position;
+            Vector3 rotation;
+            float fov;
+            BOOL isVisible;
+            float health;
+            float distance;
+        } EnemyData;
         
-        int find_game_module(void **base_address, size_t *module_size);
-        int read_memory(void *address, void *buffer, size_t size);
-        int write_memory(void *address, void *buffer, size_t size);
-        float calculate_distance(Vector3 *a, Vector3 *b);
-        void calculate_aim_angle(Vector3 *source, Vector3 *target, ViewAngle *angle);
-        void* get_entity_address(uintptr_t entity_list_base, int index);
-        int is_enemy_valid(void *entity_addr, uint32_t local_team);
+        static mach_port_t task_port = MACH_PORT_NULL;
+        static vm_size_t page_size = 0;
+        static vm_address_t enemy_base_address = 0x0;
         
-        #endif
-        EOF
-    
-    - name: Create source file
-      run: |
-        cat > src/aimlock.c << 'EOF'
-        #include "aimlock.h"
-        #include <mach/mach.h>
-        #include <mach/mach_vm.h>
-        #include <dlfcn.h>
-        #include <stdio.h>
-        #include <stdlib.h>
-        #include <string.h>
-        #include <unistd.h>
-        #include <math.h>
-        #include <sys/sysctl.h>
-        #include <mach-o/dyld.h>
-        #include <mach-o/loader.h>
-        
-        static mach_port_t game_task = MACH_PORT_NULL;
-        static void *module_base = NULL;
-        static size_t module_size = 0;
-        static uintptr_t entity_list_addr = 0;
-        static uintptr_t view_angle_addr = 0;
-        static int is_initialized = 0;
-        static uint32_t local_team = 0;
-        
-        int find_game_module(void **base_address, size_t *module_size) {
-            int ret = -1;
-            uint32_t image_count = _dyld_image_count();
+        static void init_memory_access(void) {
+            if (task_port == MACH_PORT_NULL) {
+                task_port = mach_task_self();
+                vm_size_t page_size_out;
+                host_page_size(mach_host_self(), &page_size_out);
+                page_size = page_size_out;
+            }
             
-            for (uint32_t i = 0; i < image_count; i++) {
-                const char *image_name = _dyld_get_image_name(i);
-                if (image_name && strstr(image_name, "FreeFire") != NULL) {
-                    const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(i);
-                    if (header) {
-                        *base_address = (void *)header;
-                        *module_size = 0;
-                        
-                        struct load_command *cmd = (struct load_command *)((uintptr_t)header + sizeof(struct mach_header_64));
-                        for (uint32_t j = 0; j < header->ncmds; j++) {
-                            if (cmd->cmd == LC_SEGMENT_64) {
-                                struct segment_command_64 *seg = (struct segment_command_64 *)cmd;
-                                if (strcmp(seg->segname, "__TEXT") == 0) {
-                                    *module_size = seg->vmsize;
-                                    break;
-                                }
-                            }
-                            cmd = (struct load_command *)((uintptr_t)cmd + cmd->cmdsize);
-                        }
-                        
-                        if (*module_size > 0) {
-                            ret = 0;
-                            break;
-                        }
+            if (enemy_base_address == 0x0) {
+                enemy_base_address = 0x108000000;
+            }
+        }
+        
+        static Vector3 calculate_aim_angle(Vector3 target_pos, Vector3 current_pos) {
+            float delta_x = target_pos.x - current_pos.x;
+            float delta_y = target_pos.y - current_pos.y;
+            float delta_z = target_pos.z - current_pos.z;
+            
+            float horizontal_angle = atan2f(delta_y, delta_x) * 180.0f / M_PI;
+            float vertical_angle = atan2f(delta_z, sqrtf(delta_x * delta_x + delta_y * delta_y)) * 180.0f / M_PI;
+            
+            Vector3 result;
+            result.x = horizontal_angle;
+            result.y = vertical_angle;
+            result.z = 0.0f;
+            return result;
+        }
+        
+        static void apply_aimbot(void) {
+            init_memory_access();
+            
+            kern_return_t kr;
+            vm_address_t read_address = enemy_base_address;
+            vm_size_t read_size = 0x4000;
+            vm_offset_t local_buffer = 0;
+            vm_size_t local_size = 0;
+            
+            kr = vm_read(task_port, read_address, read_size, &local_buffer, &local_size);
+            if (kr != KERN_SUCCESS) {
+                return;
+            }
+            
+            EnemyData *enemies = (EnemyData *)local_buffer;
+            int max_enemies = local_size / sizeof(EnemyData);
+            
+            EnemyData *closest_enemy = NULL;
+            float closest_distance = FLT_MAX;
+            
+            for (int i = 0; i < max_enemies; i++) {
+                if (enemies[i].isVisible && enemies[i].health > 0.0f) {
+                    float dist = enemies[i].distance;
+                    if (dist < closest_distance) {
+                        closest_distance = dist;
+                        closest_enemy = &enemies[i];
                     }
                 }
             }
             
-            return ret;
-        }
-        
-        int read_memory(void *address, void *buffer, size_t size) {
-            if (game_task == MACH_PORT_NULL) {
-                return -1;
-            }
-            
-            mach_vm_address_t target_addr = (mach_vm_address_t)address;
-            mach_vm_size_t target_size = size;
-            mach_vm_size_t bytes_read = 0;
-            
-            kern_return_t kr = mach_vm_read_overwrite(game_task, target_addr, target_size, (mach_vm_address_t)buffer, &bytes_read);
-            if (kr != KERN_SUCCESS || bytes_read != target_size) {
-                return -1;
-            }
-            
-            return 0;
-        }
-        
-        int write_memory(void *address, void *buffer, size_t size) {
-            if (game_task == MACH_PORT_NULL) {
-                return -1;
-            }
-            
-            kern_return_t kr = mach_vm_write(game_task, (mach_vm_address_t)address, (vm_offset_t)buffer, (mach_msg_type_number_t)size);
-            if (kr != KERN_SUCCESS) {
-                return -1;
-            }
-            
-            return 0;
-        }
-        
-        float calculate_distance(Vector3 *a, Vector3 *b) {
-            float dx = a->x - b->x;
-            float dy = a->y - b->y;
-            float dz = a->z - b->z;
-            return sqrtf(dx*dx + dy*dy + dz*dz);
-        }
-        
-        void calculate_aim_angle(Vector3 *source, Vector3 *target, ViewAngle *angle) {
-            Vector3 delta;
-            delta.x = target->x - source->x;
-            delta.y = target->y - source->y;
-            delta.z = target->z - source->z;
-            
-            float distance_xy = sqrtf(delta.x * delta.x + delta.y * delta.y);
-            angle->pitch = atan2f(-delta.z, distance_xy) * (180.0f / M_PI);
-            angle->yaw = atan2f(delta.y, delta.x) * (180.0f / M_PI);
-            
-            if (angle->yaw < 0) {
-                angle->yaw += 360.0f;
-            }
-        }
-        
-        void* get_entity_address(uintptr_t entity_list_base, int index) {
-            uintptr_t entity_ptr = 0;
-            if (read_memory((void *)(entity_list_base + (index * sizeof(uintptr_t))), &entity_ptr, sizeof(uintptr_t)) != 0) {
-                return NULL;
-            }
-            return (void *)entity_ptr;
-        }
-        
-        int is_enemy_valid(void *entity_addr, uint32_t local_team) {
-            if (entity_addr == NULL) {
-                return 0;
-            }
-            
-            uint32_t health = 0;
-            if (read_memory((void *)((uintptr_t)entity_addr + OFFSET_ENEMY_HEALTH), &health, sizeof(uint32_t)) != 0) {
-                return 0;
-            }
-            if (health <= 0 || health > 100) {
-                return 0;
-            }
-            
-            uint32_t team = 0;
-            if (read_memory((void *)((uintptr_t)entity_addr + OFFSET_ENEMY_TEAM), &team, sizeof(uint32_t)) != 0) {
-                return 0;
-            }
-            if (team == local_team) {
-                return 0;
-            }
-            
-            return 1;
-        }
-        
-        int initialize_aimlock(void) {
-            if (is_initialized) {
-                return 0;
-            }
-            
-            pid_t pid = 0;
-            int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
-            size_t proc_buf_size = 0;
-            
-            if (sysctl(mib, 3, NULL, &proc_buf_size, NULL, 0) != 0) {
-                return -1;
-            }
-            
-            struct kinfo_proc *procs = (struct kinfo_proc *)malloc(proc_buf_size);
-            if (procs == NULL) {
-                return -1;
-            }
-            
-            if (sysctl(mib, 3, procs, &proc_buf_size, NULL, 0) != 0) {
-                free(procs);
-                return -1;
-            }
-            
-            int proc_count = proc_buf_size / sizeof(struct kinfo_proc);
-            for (int i = 0; i < proc_count; i++) {
-                char *proc_name = procs[i].kp_proc.p_comm;
-                if (strcmp(proc_name, "FreeFire") == 0) {
-                    pid = procs[i].kp_proc.p_pid;
-                    break;
-                }
-            }
-            free(procs);
-            
-            if (pid == 0) {
-                return -1;
-            }
-            
-            kern_return_t kr = task_for_pid(mach_task_self(), pid, &game_task);
-            if (kr != KERN_SUCCESS) {
-                return -1;
-            }
-            
-            if (find_game_module(&module_base, &module_size) != 0) {
-                mach_port_deallocate(mach_task_self(), game_task);
-                game_task = MACH_PORT_NULL;
-                return -1;
-            }
-            
-            entity_list_addr = (uintptr_t)module_base + OFFSET_ENTITY_LIST;
-            view_angle_addr = (uintptr_t)module_base + OFFSET_VIEW_ANGLE;
-            
-            uintptr_t local_player_addr = 0;
-            if (read_memory((void *)((uintptr_t)module_base + OFFSET_LOCAL_PLAYER), &local_player_addr, sizeof(uintptr_t)) != 0) {
-                mach_port_deallocate(mach_task_self(), game_task);
-                game_task = MACH_PORT_NULL;
-                return -1;
-            }
-            
-            if (read_memory((void *)(local_player_addr + OFFSET_ENEMY_TEAM), &local_team, sizeof(uint32_t)) != 0) {
-                local_team = 0xFFFFFFFF;
-            }
-            
-            is_initialized = 1;
-            return 0;
-        }
-        
-        void cleanup_aimlock(void) {
-            if (game_task != MACH_PORT_NULL) {
-                mach_port_deallocate(mach_task_self(), game_task);
-                game_task = MACH_PORT_NULL;
-            }
-            is_initialized = 0;
-        }
-        
-        void aimlock_loop(void) {
-            if (!is_initialized) {
-                return;
-            }
-            
-            uint32_t entity_count = 0;
-            if (read_memory((void *)((uintptr_t)module_base + OFFSET_ENTITY_COUNT), &entity_count, sizeof(uint32_t)) != 0) {
-                return;
-            }
-            
-            if (entity_count == 0 || entity_count > 100) {
-                return;
-            }
-            
-            uintptr_t entity_list = 0;
-            if (read_memory((void *)entity_list_addr, &entity_list, sizeof(uintptr_t)) != 0) {
-                return;
-            }
-            
-            Vector3 local_pos = {0, 0, 0};
-            uintptr_t local_player_addr = 0;
-            if (read_memory((void *)((uintptr_t)module_base + OFFSET_LOCAL_PLAYER), &local_player_addr, sizeof(uintptr_t)) != 0) {
-                return;
-            }
-            
-            if (read_memory((void *)(local_player_addr + OFFSET_PLAYER_POS_X), &local_pos.x, sizeof(float)) != 0) {
-                return;
-            }
-            if (read_memory((void *)(local_player_addr + OFFSET_PLAYER_POS_Y), &local_pos.y, sizeof(float)) != 0) {
-                return;
-            }
-            if (read_memory((void *)(local_player_addr + OFFSET_PLAYER_POS_Z), &local_pos.z, sizeof(float)) != 0) {
-                return;
-            }
-            
-            float min_distance = 10000.0f;
-            Vector3 target_pos = {0, 0, 0};
-            int found_target = 0;
-            
-            for (uint32_t i = 0; i < entity_count; i++) {
-                void *entity_addr = get_entity_address(entity_list, i);
-                if (!is_enemy_valid(entity_addr, local_team)) {
-                    continue;
-                }
+            if (closest_enemy != NULL) {
+                Vector3 current_position = {0.0f, 0.0f, 0.0f};
+                Vector3 aim_angle = calculate_aim_angle(closest_enemy->position, current_position);
                 
-                Vector3 enemy_pos = {0, 0, 0};
-                if (read_memory((void *)((uintptr_t)entity_addr + OFFSET_PLAYER_POS_X), &enemy_pos.x, sizeof(float)) != 0) {
-                    continue;
-                }
-                if (read_memory((void *)((uintptr_t)entity_addr + OFFSET_PLAYER_POS_Y), &enemy_pos.y, sizeof(float)) != 0) {
-                    continue;
-                }
-                if (read_memory((void *)((uintptr_t)entity_addr + OFFSET_PLAYER_POS_Z), &enemy_pos.z, sizeof(float)) != 0) {
-                    continue;
-                }
+                vm_address_t rotation_address = enemy_base_address + 
+                    ((uintptr_t)closest_enemy - (uintptr_t)enemies) + 
+                    offsetof(EnemyData, rotation);
                 
-                float dist = calculate_distance(&local_pos, &enemy_pos);
-                if (dist < min_distance && dist > 0.5f) {
-                    min_distance = dist;
-                    target_pos = enemy_pos;
-                    found_target = 1;
+                kr = vm_write(task_port, rotation_address, (vm_offset_t)&aim_angle, sizeof(Vector3));
+                if (kr != KERN_SUCCESS) {
                 }
             }
             
-            if (!found_target) {
-                return;
-            }
-            
-            ViewAngle angle = {0, 0};
-            calculate_aim_angle(&local_pos, &target_pos, &angle);
-            
-            if (angle.pitch < -90.0f) angle.pitch = -90.0f;
-            if (angle.pitch > 90.0f) angle.pitch = 90.0f;
-            if (angle.yaw < 0.0f) angle.yaw += 360.0f;
-            if (angle.yaw >= 360.0f) angle.yaw -= 360.0f;
-            
-            write_memory((void *)view_angle_addr, &angle, sizeof(ViewAngle));
-        }
-        
-        __attribute__((constructor))
-        static void on_load(void) {
-            if (initialize_aimlock() == 0) {
-                while (1) {
-                    aimlock_loop();
-                    usleep(5000);
-                }
+            kr = vm_deallocate(task_port, local_buffer, local_size);
+            if (kr != KERN_SUCCESS) {
             }
         }
         
-        __attribute__((destructor))
-        static void on_unload(void) {
-            cleanup_aimlock();
+        %hook GameManager
+        - (void)update {
+            %orig;
+            apply_aimbot();
+        }
+        %end
+        
+        %hook PlayerController
+        - (void)updatePosition {
+            %orig;
+            Vector3 player_pos = {0.0f, 0.0f, 0.0f};
+        }
+        %end
+        
+        %ctor {
+            dlopen("/usr/lib/libc++.dylib", RTLD_LAZY);
+            init_memory_access();
         }
         EOF
     
-    - name: Create Makefile
+    - name: Generate Makefile
       run: |
-        cat > Makefile << 'EOF'
-        CC = clang
-        SDK_PATH = $(shell xcrun --sdk iphoneos --show-sdk-path)
-        ARCH = arm64
-        TARGET = libaimlock.dylib
-        SRC_DIR = src
-        INC_DIR = include
-        BUILD_DIR = build
+        cat > src/Makefile << 'EOF'
+        export THEOS := $(THEOS)
+        export TARGET := iphone:latest:14.0
+        export ARCHS := arm64 arm64e
+        export DEBUG := 0
+        export GO_EASY_ON_ME := 1
         
-        CFLAGS = -arch $(ARCH) -isysroot $(SDK_PATH) -dynamiclib
-        CFLAGS += -compatibility_version 1.0 -current_version 1.0
-        CFLAGS += -Wall -Wextra -O2
-        CFLAGS += -I$(INC_DIR)
+        include $(THEOS)/makefiles/common.mk
         
-        LDFLAGS = -framework Foundation -framework CoreFoundation
-        LDFLAGS += -Wl,-install_name,@rpath/$(TARGET)
+        TWEAK_NAME = AimLock
+        AimLock_FILES = Tweak.x
+        AimLock_CFLAGS = -fobjc-arc -O3 -Wall -Wextra
+        AimLock_LDFLAGS = -v -Wl,-U,_vm_region -Wl,-U,_mach_vm_read -Wl,-U,_mach_vm_write
+        AimLock_FRAMEWORKS = UIKit CoreGraphics Foundation
+        AimLock_PRIVATE_FRAMEWORKS = 
         
-        SOURCES = $(wildcard $(SRC_DIR)/*.c)
-        OBJECTS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SOURCES))
+        include $(THEOS_MAKE_PATH)/tweak.mk
         
-        all: $(BUILD_DIR) $(TARGET)
-        
-        $(BUILD_DIR):
-        \tmkdir -p $(BUILD_DIR)
-        
-        $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
-        \t$(CC) $(CFLAGS) -c $< -o $@
-        
-        $(TARGET): $(OBJECTS)
-        \t$(CC) $(CFLAGS) $(OBJECTS) $(LDFLAGS) -o $@
-        
-        clean:
-        \trm -rf $(BUILD_DIR) $(TARGET)
-        
-        .PHONY: all clean
+        after-install::
+            install.exec "killall -9 FreeFire && uicache -a"
         EOF
     
-    - name: Build dynamic library
+    - name: Generate AimLock.plist
       run: |
-        make clean
-        make
+        cat > layout/Library/MobileSubstrate/DynamicLibraries/AimLock.plist << 'EOF'
+        {
+            Filter = {
+                Bundles = ("com.dts.freefireth");
+            };
+        }
+        EOF
     
-    - name: Verify build output
+    - name: Build the tweak
       run: |
-        if [ ! -f libaimlock.dylib ]; then
-          echo "Error: libaimlock.dylib not found after build"
-          exit 1
-        fi
-        file libaimlock.dylib
-        ls -la libaimlock.dylib
+        cd src
+        export THEOS=$HOME/theos
+        export TARGET=iphone:latest:14.0
+        make package
+        cp packages/*.deb ../layout/
     
-    - name: Upload artifact
+    - name: Create final deb package
+      run: |
+        cd layout
+        dpkg-deb -b . ../com.freefire.aimlock_1.0.0_iphoneos-arm.deb
+        cd ..
+        mkdir -p release
+        cp com.freefire.aimlock_1.0.0_iphoneos-arm.deb release/
+    
+    - name: Upload artifact for TrollStore
       uses: actions/upload-artifact@v4
       with:
-        name: libaimlock
-        path: |
-          libaimlock.dylib
-          include/aimlock.h
+        name: TrollStore-AimLock
+        path: release/com.freefire.aimlock_1.0.0_iphoneos-arm.deb
         retention-days: 30
