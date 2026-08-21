@@ -1,108 +1,34 @@
-# GitHub Actions workflow cho biên dịch dylib từ C/C++ và upload artifact
-# Tên file: .github/workflows/build-dylib.yml
-
 name: Build dylib cho FreeFire Aimbot
-
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: macos-latest
-    strategy:
-      matrix:
-        build-type: [c, cpp, cs]
     steps:
     - name: Checkout mã nguồn
       uses: actions/checkout@v4
-
     - name: Xác định loại dự án và file chính
       id: detect
       run: |
-        if [ -f "*.csproj" ]; then
+        if ls *.csproj 1> /dev/null 2>&1; then
           echo "build_type=cs" >> $GITHUB_OUTPUT
           echo "main_file=$(ls *.csproj | head -1)" >> $GITHUB_OUTPUT
-        elif [ -f "*.cpp" ]; then
+        elif ls *.cpp 1> /dev/null 2>&1; then
           echo "build_type=cpp" >> $GITHUB_OUTPUT
           echo "main_file=$(ls *.cpp | head -1)" >> $GITHUB_OUTPUT
-        elif [ -f "*.c" ]; then
+        elif ls *.c 1> /dev/null 2>&1; then
           echo "build_type=c" >> $GITHUB_OUTPUT
           echo "main_file=$(ls *.c | head -1)" >> $GITHUB_OUTPUT
         else
-          echo "Không tìm thấy file .c, .cpp hoặc .csproj"
-          exit 1
+          echo "build_type=none" >> $GITHUB_OUTPUT
+          echo "main_file=none" >> $GITHUB_OUTPUT
         fi
         echo "dylib_name=$(basename $(pwd)).dylib" >> $GITHUB_OUTPUT
       shell: bash
-
-    - name: Cài đặt .NET SDK
-      if: steps.detect.outputs.build_type == 'cs'
-      uses: actions/setup-dotnet@v3
-      with:
-        dotnet-version: '8.0.x'
-
-    - name: Biên dịch C với gcc
-      if: steps.detect.outputs.build_type == 'c'
-      run: |
-        mkdir -p build
-        gcc -shared -fPIC -o build/${{ steps.detect.outputs.dylib_name }} ${{ steps.detect.outputs.main_file }} \
-          -I/usr/local/include -L/usr/local/lib \
-          -Wall -Wextra -O2
-        if [ ! -f "build/${{ steps.detect.outputs.dylib_name }}" ]; then
-          echo "Biên dịch C thất bại"
-          exit 1
-        fi
-
-    - name: Biên dịch C++ với g++ hoặc cmake
-      if: steps.detect.outputs.build_type == 'cpp'
-      run: |
-        mkdir -p build
-        if [ -f "CMakeLists.txt" ]; then
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release
-          make
-          DYLIB_FILE=$(find . -name "*.dylib" | head -1)
-          if [ -z "$DYLIB_FILE" ]; then
-            echo "CMake không sinh ra .dylib"
-            exit 1
-          fi
-          mv "$DYLIB_FILE" "${{ steps.detect.outputs.dylib_name }}"
-          cd ..
-        else
-          g++ -shared -fPIC -std=c++17 -o build/${{ steps.detect.outputs.dylib_name }} \
-            ${{ steps.detect.outputs.main_file }} \
-            -I/usr/local/include -L/usr/local/lib \
-            -Wall -Wextra -O2
-          if [ ! -f "build/${{ steps.detect.outputs.dylib_name }}" ]; then
-            echo "Biên dịch C++ thất bại"
-            exit 1
-          fi
-        fi
-
-    - name: Biên dịch C# với dotnet
-      if: steps.detect.outputs.build_type == 'cs'
-      run: |
-        mkdir -p build
-        dotnet restore ${{ steps.detect.outputs.main_file }}
-        dotnet build ${{ steps.detect.outputs.main_file }} -c Release -o build
-        if [ -f "build/*.dylib" ]; then
-          DYLIB_FILE=$(ls build/*.dylib | head -1)
-          mv "$DYLIB_FILE" "build/${{ steps.detect.outputs.dylib_name }}"
-        else
-          echo "Dummy dylib for C#" > "build/${{ steps.detect.outputs.dylib_name }}"
-        fi
-
-    - name: Upload artifact .dylib
-      uses: actions/upload-artifact@v4
-      with:
-        name: dylib-${{ steps.detect.outputs.build-type }}-${{ github.sha }}
-        path: build/${{ steps.detect.outputs.dylib_name }}
-        retention-days: 7
-
     - name: Tạo file aimbot.c
       run: |
         cat > aimbot.c << 'EOF'
@@ -115,6 +41,7 @@ jobs:
 #include <mach/vm_map.h>
 #include <mach-o/dyld.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include <TargetConditionals.h>
 
 #define OFFSET_BONE_HEAD_1 0x00080BD5
 #define OFFSET_BONE_HEAD_2 0x000A8771
@@ -125,11 +52,6 @@ typedef struct {
     float y;
     float z;
 } Vector3;
-
-typedef struct {
-    Vector3 center;
-    float radius;
-} HeadCircle;
 
 static kern_return_t read_memory(mach_port_t task, mach_vm_address_t address, void *buffer, size_t size) {
     vm_size_t out_size = 0;
@@ -156,7 +78,6 @@ static Vector3 read_head_position(mach_port_t task, mach_vm_address_t base_addre
     mach_vm_address_t addr1 = base_address + OFFSET_BONE_HEAD_1;
     mach_vm_address_t addr2 = base_address + OFFSET_BONE_HEAD_2;
     mach_vm_address_t addr3 = base_address + OFFSET_BONE_HEAD_3;
-    
     if (read_memory(task, addr1, &head_pos, sizeof(Vector3)) != KERN_SUCCESS) {
         if (read_memory(task, addr2, &head_pos, sizeof(Vector3)) != KERN_SUCCESS) {
             read_memory(task, addr3, &head_pos, sizeof(Vector3));
@@ -169,91 +90,80 @@ static float calculate_head_radius(Vector3 head_pos, Vector3 camera_pos, float f
     float dx = head_pos.x - camera_pos.x;
     float dy = head_pos.y - camera_pos.y;
     float dz = head_pos.z - camera_pos.z;
-    float distance = sqrt(dx*dx + dy*dy + dz*dz);
+    float distance = sqrtf(dx*dx + dy*dy + dz*dz);
+    if (distance < 0.0001f) return 0.5f;
     return (0.5f / distance) * fov;
 }
 
-static void aimbot_adjust(mach_port_t task, mach_vm_address_t base_address, Vector3 head_pos, float radius) {
+static void aimbot_adjust(mach_port_t task, mach_vm_address_t base_address, Vector3 head_pos) {
     mach_vm_address_t camera_addr = base_address + 0x1000000;
     Vector3 camera_pos;
     if (read_memory(task, camera_addr, &camera_pos, sizeof(Vector3)) != KERN_SUCCESS) {
         return;
     }
-    
     Vector3 target_dir;
     target_dir.x = head_pos.x - camera_pos.x;
     target_dir.y = head_pos.y - camera_pos.y;
     target_dir.z = head_pos.z - camera_pos.z;
-    
-    float len = sqrt(target_dir.x*target_dir.x + target_dir.y*target_dir.y + target_dir.z*target_dir.z);
+    float len = sqrtf(target_dir.x*target_dir.x + target_dir.y*target_dir.y + target_dir.z*target_dir.z);
     if (len < 0.0001f) return;
     target_dir.x /= len;
     target_dir.y /= len;
     target_dir.z /= len;
-    
     mach_vm_address_t view_angle_addr = base_address + 0x1001000;
     float view_angle[2] = {target_dir.x, target_dir.y};
     write_memory(task, view_angle_addr, view_angle, sizeof(view_angle));
 }
 
-static void draw_head_circle(Vector3 head_pos, float radius) {
-    printf("Head circle: center(%.2f, %.2f, %.2f) radius=%.2f\n", 
-           head_pos.x, head_pos.y, head_pos.z, radius);
-}
-
 __attribute__((constructor))
 static void initialize_aimbot() {
-    printf("Aimbot dylib loaded - FreeFire Head Circle Aimbot\n");
-    
     mach_port_t task = mach_task_self();
     mach_vm_address_t base = find_module_base("FreeFire");
     if (base == 0) {
-        printf("Không tìm thấy module FreeFire\n");
         return;
     }
-    printf("Base address: 0x%llx\n", (unsigned long long)base);
-    
     Vector3 head = read_head_position(task, base);
     if (head.x == 0 && head.y == 0 && head.z == 0) {
-        printf("Không đọc được vị trí đầu\n");
         return;
     }
-    
-    Vector3 camera = {0, 0, 0};
-    float radius = calculate_head_radius(head, camera, 60.0f);
-    
-    draw_head_circle(head, radius);
-    
-    aimbot_adjust(task, base, head, radius);
-    
-    printf("Aimbot initialized successfully\n");
+    aimbot_adjust(task, base, head);
 }
 
 __attribute__((visibility("default")))
 void start_aimbot() {
     initialize_aimbot();
 }
-
-__attribute__((destructor))
-static void cleanup_aimbot() {
-    printf("Aimbot dylib unloaded\n");
-}
 EOF
-
     - name: Biên dịch aimbot.c thành dylib
       run: |
         mkdir -p build
-        gcc -shared -fPIC -o build/libaimbot.dylib aimbot.c \
-          -framework Foundation -framework CoreGraphics \
-          -Wall -Wextra -O2
-        if [ ! -f "build/libaimbot.dylib" ]; then
-          echo "Biên dịch aimbot.c thất bại"
-          exit 1
+        gcc -shared -fPIC -o build/libaimbot.dylib aimbot.c -framework Foundation -framework CoreGraphics -Wall -O2
+    - name: Biên dịch C với gcc
+      if: steps.detect.outputs.build_type == 'c'
+      run: |
+        mkdir -p build
+        gcc -shared -fPIC -o build/${{ steps.detect.outputs.dylib_name }} ${{ steps.detect.outputs.main_file }} -Wall -O2
+    - name: Biên dịch C++ với g++
+      if: steps.detect.outputs.build_type == 'cpp'
+      run: |
+        mkdir -p build
+        if [ -f "CMakeLists.txt" ]; then
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          make
+          cd ..
+        else
+          g++ -shared -fPIC -std=c++17 -o build/${{ steps.detect.outputs.dylib_name }} ${{ steps.detect.outputs.main_file }} -Wall -O2
         fi
-
-    - name: Upload artifact aimbot dylib
+    - name: Biên dịch C# với dotnet
+      if: steps.detect.outputs.build_type == 'cs'
+      run: |
+        mkdir -p build
+        dotnet restore ${{ steps.detect.outputs.main_file }}
+        dotnet build ${{ steps.detect.outputs.main_file }} -c Release -o build
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: aimbot-dylib-${{ github.sha }}
-        path: build/libaimbot.dylib
+        name: dylib-${{ github.sha }}
+        path: build/*.dylib
         retention-days: 7
