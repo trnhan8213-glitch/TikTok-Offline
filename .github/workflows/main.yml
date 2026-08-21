@@ -67,19 +67,10 @@ jobs:
             float yaw;
         } ViewAngles;
 
-        // Hàm đọc bộ nhớ tiến trình
         kern_return_t read_memory(task_t task, mach_vm_address_t address, void *buffer, mach_msg_type_number_t size);
-
-        // Hàm ghi bộ nhớ tiến trình
         kern_return_t write_memory(task_t task, mach_vm_address_t address, void *buffer, mach_msg_type_number_t size);
-
-        // Hàm lấy địa chỉ module game
         mach_vm_address_t get_module_base(const char *module_name);
-
-        // Hàm tính toán góc nhắm
         ViewAngles calculate_aim_angle(Vector3 local_pos, Vector3 target_pos, ViewAngles current_angle);
-
-        // Hàm logic chính
         void aimlock_loop(void);
 
         #endif
@@ -92,7 +83,6 @@ jobs:
         #include <mach-o/dyld.h>
         #include <math.h>
 
-        // Đọc bộ nhớ từ tiến trình
         kern_return_t read_memory(task_t task, mach_vm_address_t address, void *buffer, mach_msg_type_number_t size) {
             mach_vm_size_t data_count = size;
             kern_return_t kr = mach_vm_read_overwrite(task, address, size, (mach_vm_address_t)buffer, &data_count);
@@ -105,7 +95,6 @@ jobs:
             return KERN_SUCCESS;
         }
 
-        // Ghi bộ nhớ vào tiến trình
         kern_return_t write_memory(task_t task, mach_vm_address_t address, void *buffer, mach_msg_type_number_t size) {
             kern_return_t kr = mach_vm_write(task, address, (vm_offset_t)buffer, size);
             if (kr != KERN_SUCCESS) {
@@ -114,7 +103,6 @@ jobs:
             return KERN_SUCCESS;
         }
 
-        // Lấy địa chỉ module game dựa trên tên
         mach_vm_address_t get_module_base(const char *module_name) {
             uint32_t count = _dyld_image_count();
             for (uint32_t i = 0; i < count; i++) {
@@ -126,7 +114,6 @@ jobs:
             return 0;
         }
 
-        // Tính góc pitch và yaw để nhắm vào mục tiêu
         ViewAngles calculate_aim_angle(Vector3 local_pos, Vector3 target_pos, ViewAngles current_angle) {
             ViewAngles result;
             Vector3 delta;
@@ -141,16 +128,13 @@ jobs:
                 return result;
             }
 
-            // Tính yaw (góc ngang)
             result.yaw = atan2(delta.y, delta.x) * (180.0 / PI);
-            // Chuẩn hóa yaw về khoảng [-180, 180]
             if (result.yaw > 180.0) {
                 result.yaw -= 360.0;
             } else if (result.yaw < -180.0) {
                 result.yaw += 360.0;
             }
 
-            // Tính pitch (góc dọc)
             result.pitch = -atan2(delta.z, sqrt(delta.x * delta.x + delta.y * delta.y)) * (180.0 / PI);
             if (result.pitch > 89.0) {
                 result.pitch = 89.0;
@@ -161,18 +145,14 @@ jobs:
             return result;
         }
 
-        // Hàm vòng lặp chính của aimlock
         void aimlock_loop(void) {
-            // Lấy task port của tiến trình hiện tại (giả định đã được tiêm vào game)
             task_t task = mach_task_self();
             
-            // Lấy địa chỉ module game
             mach_vm_address_t module_base = get_module_base("FreeFire");
             if (module_base == 0) {
                 return;
             }
 
-            // Đọc entity list
             mach_vm_address_t entity_list_addr = module_base + OFFSET_ENTITY_LIST;
             mach_vm_address_t entity_list[MAX_ENTITIES];
             mach_msg_type_number_t size = sizeof(entity_list);
@@ -181,7 +161,6 @@ jobs:
                 return;
             }
 
-            // Đọc số lượng entity
             uint32_t entity_count = 0;
             mach_vm_address_t count_addr = module_base + OFFSET_ENTITY_COUNT;
             kr = read_memory(task, count_addr, &entity_count, sizeof(uint32_t));
@@ -189,7 +168,6 @@ jobs:
                 return;
             }
 
-            // Đọc local player
             mach_vm_address_t local_player_addr = module_base + OFFSET_LOCAL_PLAYER;
             uintptr_t local_player_ptr = 0;
             kr = read_memory(task, local_player_addr, &local_player_ptr, sizeof(uintptr_t));
@@ -197,7 +175,6 @@ jobs:
                 return;
             }
 
-            // Đọc vị trí local player
             Vector3 local_pos;
             mach_vm_address_t pos_addr = local_player_ptr + OFFSET_PLAYER_POS_X;
             kr = read_memory(task, pos_addr, &local_pos, sizeof(Vector3));
@@ -205,7 +182,6 @@ jobs:
                 return;
             }
 
-            // Đọc góc nhìn hiện tại
             ViewAngles current_angle;
             mach_vm_address_t angle_addr = module_base + OFFSET_VIEW_ANGLE;
             kr = read_memory(task, angle_addr, &current_angle, sizeof(ViewAngles));
@@ -213,7 +189,6 @@ jobs:
                 return;
             }
 
-            // Tìm đối thủ gần nhất
             Entity closest_enemy;
             float closest_distance = 999999.0;
             int found = 0;
@@ -221,32 +196,27 @@ jobs:
             for (uint32_t i = 0; i < entity_count && i < MAX_ENTITIES; i++) {
                 if (entity_list[i] == 0) continue;
 
-                // Đọc team của entity
                 int team = 0;
                 mach_vm_address_t team_addr = entity_list[i] + OFFSET_ENEMY_TEAM;
                 kr = read_memory(task, team_addr, &team, sizeof(int));
                 if (kr != KERN_SUCCESS) continue;
 
-                // Bỏ qua entity cùng team
                 int local_team = 0;
                 mach_vm_address_t local_team_addr = local_player_ptr + OFFSET_ENEMY_TEAM;
                 kr = read_memory(task, local_team_addr, &local_team, sizeof(int));
                 if (kr != KERN_SUCCESS) continue;
                 if (team == local_team) continue;
 
-                // Đọc health
                 float health = 0;
                 mach_vm_address_t health_addr = entity_list[i] + OFFSET_ENEMY_HEALTH;
                 kr = read_memory(task, health_addr, &health, sizeof(float));
                 if (kr != KERN_SUCCESS || health <= 0.0) continue;
 
-                // Đọc vị trí entity
                 Vector3 enemy_pos;
                 mach_vm_address_t enemy_pos_addr = entity_list[i] + OFFSET_PLAYER_POS_X;
                 kr = read_memory(task, enemy_pos_addr, &enemy_pos, sizeof(Vector3));
                 if (kr != KERN_SUCCESS) continue;
 
-                // Tính khoảng cách
                 float dx = enemy_pos.x - local_pos.x;
                 float dy = enemy_pos.y - local_pos.y;
                 float dz = enemy_pos.z - local_pos.z;
@@ -265,20 +235,16 @@ jobs:
                 return;
             }
 
-            // Tính góc nhắm
             ViewAngles aim_angle = calculate_aim_angle(local_pos, closest_enemy.position, current_angle);
 
-            // Ghi góc mới vào bộ nhớ
             kr = write_memory(task, angle_addr, &aim_angle, sizeof(ViewAngles));
             if (kr != KERN_SUCCESS) {
                 return;
             }
         }
 
-        // Constructor tự động chạy khi dylib được load
         __attribute__((constructor))
         void initialize_aimlock(void) {
-            // Chạy một lần khi load
             aimlock_loop();
         }
         EOF
