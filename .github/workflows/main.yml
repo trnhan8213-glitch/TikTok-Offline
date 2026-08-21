@@ -23,6 +23,40 @@ jobs:
         run: |
           mkdir -p src include
 
+      - name: Tao file Info.plist
+        run: |
+          cat > include/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>libaimlock</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.aimlock.dylib</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>libaimlock</string>
+              <key>CFBundlePackageType</key>
+              <string>DYLIB</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>MinimumOSVersion</key>
+              <string>14.0</string>
+              <key>UIDeviceFamily</key>
+              <array>
+                  <integer>1</integer>
+                  <integer>2</integer>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
       - name: Tao file memory_ops.h
         run: |
           cat > include/memory_ops.h << 'EOF'
@@ -60,20 +94,6 @@ jobs:
           #define OFFSET_HEAD_TO 0x000B3777
           #define OFFSET_HEAD_OF 0x000B0543
           #define OFFSET_HEAD_TAG 0x00066EA5
-          #define OFFSET_HEAD_ANIM 0x000DBBAB
-          #define OFFSET_HEAD_REBORN 0x001E489E
-          #define OFFSET_HEAD_LIGHTS 0x002073C1
-          #define OFFSET_HEAD_SPRITE 0x00472183
-          #define OFFSET_HEAD_ICON 0x00548AE4
-          #define OFFSET_HEAD_TEXTURE 0x00599545
-          #define OFFSET_HEAD_SCALE 0x006416FF
-          #define OFFSET_HEAD_AVATAR 0x00641705
-          #define OFFSET_HEAD_FRAME 0x006417C5
-          #define OFFSET_HEAD_BTN_LEFT 0x006C7302
-          #define OFFSET_HEAD_BTN_RIGHT 0x006C7308
-          #define OFFSET_HEAD_PIC_ID 0x005DFEC4
-          #define OFFSET_HEAD_PIC_DATA 0x005DFEDC
-          #define OFFSET_HEAD_PIC_ITEM 0x005DFEE9
 
           typedef struct {
               float x;
@@ -81,15 +101,6 @@ jobs:
               float z;
               float w;
           } Vector4;
-
-          typedef struct {
-              Vector4 position;
-              Vector4 rotation;
-              float bone_weights[8];
-              float headshot_multiplier;
-              uint32_t head_flags;
-              uint32_t head_state;
-          } HeadData;
 
           typedef struct {
               bool enabled;
@@ -102,8 +113,6 @@ jobs:
               float aim_y;
               float aim_z;
               float smoothness;
-              float fov;
-              float sensitivity;
               float button_x;
               float button_y;
               float button_size;
@@ -128,25 +137,10 @@ jobs:
               mach_vm_address_t head_to;
               mach_vm_address_t head_of;
               mach_vm_address_t head_tag;
-              mach_vm_address_t head_anim;
-              mach_vm_address_t head_reborn;
-              mach_vm_address_t head_lights;
-              mach_vm_address_t head_sprite;
-              mach_vm_address_t head_icon;
-              mach_vm_address_t head_texture;
-              mach_vm_address_t head_scale;
-              mach_vm_address_t head_avatar;
-              mach_vm_address_t head_frame;
-              mach_vm_address_t head_btn_left;
-              mach_vm_address_t head_btn_right;
-              mach_vm_address_t head_pic_id;
-              mach_vm_address_t head_pic_data;
-              mach_vm_address_t head_pic_item;
           } AimlockState;
 
           kern_return_t read_memory(task_t task, mach_vm_address_t address, void *buffer, mach_vm_size_t size);
           kern_return_t write_memory(task_t task, mach_vm_address_t address, const void *buffer, mach_vm_size_t size);
-          kern_return_t protect_memory(task_t task, mach_vm_address_t address, mach_vm_size_t size, vm_prot_t prot);
           mach_vm_address_t find_pattern_in_memory(task_t task, mach_vm_address_t start, mach_vm_size_t size, const unsigned char *pattern, size_t pattern_len);
           mach_vm_address_t get_runtime_address(mach_vm_address_t base, uint64_t offset);
           void flush_cache_arm64(void *address, size_t size);
@@ -157,9 +151,6 @@ jobs:
           void toggle_aim_assist(bool enable);
           void toggle_auto_fire(bool enable);
           void perform_aimlock(void);
-          void perform_headshot(void);
-          void perform_aim_assist(void);
-          void update_kill_stats(void);
           void reset_aim_values(void);
 
           #endif
@@ -212,17 +203,6 @@ jobs:
               }
               printf("[Aimlock] Wrote %zu bytes at 0x%llx\n", size, address);
               return KERN_SUCCESS;
-          }
-
-          kern_return_t protect_memory(task_t task, mach_vm_address_t address, mach_vm_size_t size, vm_prot_t prot) {
-              if (task == MACH_PORT_NULL || address == 0 || size == 0) {
-                  return KERN_INVALID_ARGUMENT;
-              }
-              vm_size_t page_size = 0;
-              host_page_size(mach_host_self(), &page_size);
-              mach_vm_address_t page_start = address & ~(page_size - 1);
-              mach_vm_size_t region_size = size + (address - page_start);
-              return mach_vm_protect(task, page_start, region_size, false, prot);
           }
 
           mach_vm_address_t find_pattern_in_memory(task_t task, mach_vm_address_t start, mach_vm_size_t size, const unsigned char *pattern, size_t pattern_len) {
@@ -292,8 +272,6 @@ jobs:
               .aim_y = 0.0,
               .aim_z = 0.0,
               .smoothness = 0.5,
-              .fov = 90.0,
-              .sensitivity = 1.0,
               .button_x = 50,
               .button_y = 200,
               .button_size = 60,
@@ -317,87 +295,23 @@ jobs:
               .head_elem = 0,
               .head_to = 0,
               .head_of = 0,
-              .head_tag = 0,
-              .head_anim = 0,
-              .head_reborn = 0,
-              .head_lights = 0,
-              .head_sprite = 0,
-              .head_icon = 0,
-              .head_texture = 0,
-              .head_scale = 0,
-              .head_avatar = 0,
-              .head_frame = 0,
-              .head_btn_left = 0,
-              .head_btn_right = 0,
-              .head_pic_id = 0,
-              .head_pic_data = 0,
-              .head_pic_item = 0
+              .head_tag = 0
           };
 
           static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
           static bool g_scanning = false;
           static uint32_t g_frame_counter = 0;
 
-          // Pattern arrays for scanning
-          static const unsigned char pattern_bone_head[] = {
-              0x62, 0x6f, 0x6e, 0x65, 0x5f, 0x48, 0x65, 0x61, 0x64
-          };
-          static const unsigned char pattern_headshot[] = {
-              0x68, 0x65, 0x61, 0x64, 0x73, 0x68, 0x6f, 0x74
-          };
-          static const unsigned char pattern_head_shot[] = {
-              0x68, 0x65, 0x61, 0x64, 0x5f, 0x73, 0x68, 0x6f, 0x74
-          };
-          static const unsigned char pattern_high_head[] = {
-              0x68, 0x69, 0x67, 0x68, 0x5f, 0x68, 0x65, 0x61, 0x64
-          };
-          static const unsigned char pattern_head_pic[] = {
-              0x68, 0x65, 0x61, 0x64, 0x5f, 0x70, 0x69, 0x63
-          };
-          static const unsigned char pattern_head_btn[] = {
-              0x68, 0x65, 0x61, 0x64, 0x62, 0x74, 0x6e
-          };
-          static const unsigned char pattern_head_anim[] = {
-              0x48, 0x65, 0x61, 0x64, 0x20, 0x41, 0x6e, 0x69, 0x6d
-          };
-          static const unsigned char pattern_head_reborn[] = {
-              0x68, 0x65, 0x61, 0x64, 0x20, 0x72, 0x65, 0x62, 0x6f, 0x72, 0x6e
-          };
-          static const unsigned char pattern_head_sprite[] = {
-              0x68, 0x65, 0x61, 0x64, 0x53, 0x70, 0x72, 0x69, 0x74, 0x65
-          };
-          static const unsigned char pattern_head_icon[] = {
-              0x68, 0x65, 0x61, 0x64, 0x49, 0x63, 0x6f, 0x6e
-          };
-          static const unsigned char pattern_head_texture[] = {
-              0x68, 0x65, 0x61, 0x64, 0x54, 0x65, 0x78, 0x74, 0x75, 0x72, 0x65
-          };
-          static const unsigned char pattern_head_scale[] = {
-              0x68, 0x65, 0x61, 0x64, 0x53, 0x63, 0x61, 0x6c, 0x65
-          };
-          static const unsigned char pattern_head_avatar[] = {
-              0x68, 0x65, 0x61, 0x64, 0x41, 0x76, 0x61, 0x74, 0x61, 0x72
-          };
-          static const unsigned char pattern_head_frame[] = {
-              0x68, 0x65, 0x61, 0x64, 0x46, 0x72, 0x61, 0x6d, 0x65
-          };
-          static const unsigned char pattern_head_elem[] = {
-              0x68, 0x65, 0x61, 0x64, 0x20, 0x65, 0x6c, 0x65, 0x6d, 0x65, 0x6e, 0x74
-          };
-          static const unsigned char pattern_head_to[] = {
-              0x68, 0x65, 0x61, 0x64, 0x20, 0x74, 0x6f
-          };
-          static const unsigned char pattern_head_of[] = {
-              0x68, 0x65, 0x61, 0x64, 0x20, 0x6f, 0x66
-          };
-          static const unsigned char pattern_head_tag[] = {
-              0x68, 0x65, 0x61, 0x64, 0x27, 0x29
-          };
+          static const unsigned char pattern_bone_head[] = {0x62, 0x6f, 0x6e, 0x65, 0x5f, 0x48, 0x65, 0x61, 0x64};
+          static const unsigned char pattern_headshot[] = {0x68, 0x65, 0x61, 0x64, 0x73, 0x68, 0x6f, 0x74};
+          static const unsigned char pattern_head_shot[] = {0x68, 0x65, 0x61, 0x64, 0x5f, 0x73, 0x68, 0x6f, 0x74};
+          static const unsigned char pattern_high_head[] = {0x68, 0x69, 0x67, 0x68, 0x5f, 0x68, 0x65, 0x61, 0x64};
+          static const unsigned char pattern_head_pic[] = {0x68, 0x65, 0x61, 0x64, 0x5f, 0x70, 0x69, 0x63};
+          static const unsigned char pattern_head_btn[] = {0x68, 0x65, 0x61, 0x64, 0x62, 0x74, 0x6e};
+          static const unsigned char pattern_head_elem[] = {0x68, 0x65, 0x61, 0x64, 0x20, 0x65, 0x6c, 0x65, 0x6d, 0x65, 0x6e, 0x74};
 
           void scan_all_offsets(void) {
-              if (g_scanning) {
-                  return;
-              }
+              if (g_scanning) return;
               g_scanning = true;
               task_t task = mach_task_self();
               mach_vm_address_t start = 0x100000000;
@@ -406,7 +320,6 @@ jobs:
 
               printf("[Aimlock] Scanning all head offsets...\n");
 
-              // Scan bone_head
               found = find_pattern_in_memory(task, start, size, pattern_bone_head, sizeof(pattern_bone_head));
               if (found) {
                   g_state.head_1 = found;
@@ -415,7 +328,6 @@ jobs:
                   printf("[Aimlock] Bone head at: 0x%llx\n", found);
               }
 
-              // Scan headshot
               found = find_pattern_in_memory(task, start, size, pattern_headshot, sizeof(pattern_headshot));
               if (found) {
                   g_state.headshot_1 = found;
@@ -424,121 +336,36 @@ jobs:
                   printf("[Aimlock] Headshot at: 0x%llx\n", found);
               }
 
-              // Scan head_shot
               found = find_pattern_in_memory(task, start, size, pattern_head_shot, sizeof(pattern_head_shot));
               if (found) {
                   g_state.head_kill = found;
                   printf("[Aimlock] Head shot kill at: 0x%llx\n", found);
               }
 
-              // Scan high_head
               found = find_pattern_in_memory(task, start, size, pattern_high_head, sizeof(pattern_high_head));
               if (found) {
                   g_state.high_head = found;
                   printf("[Aimlock] High head at: 0x%llx\n", found);
               }
 
-              // Scan head_pic
               found = find_pattern_in_memory(task, start, size, pattern_head_pic, sizeof(pattern_head_pic));
               if (found) {
                   g_state.head_pic = found;
                   printf("[Aimlock] Head pic at: 0x%llx\n", found);
               }
 
-              // Scan head_btn
               found = find_pattern_in_memory(task, start, size, pattern_head_btn, sizeof(pattern_head_btn));
               if (found) {
                   g_state.head_btn = found;
-                  g_state.head_btn_left = found + 0x100;
-                  g_state.head_btn_right = found + 0x200;
                   printf("[Aimlock] Head btn at: 0x%llx\n", found);
               }
 
-              // Scan head_anim
-              found = find_pattern_in_memory(task, start, size, pattern_head_anim, sizeof(pattern_head_anim));
-              if (found) {
-                  g_state.head_anim = found;
-                  printf("[Aimlock] Head anim at: 0x%llx\n", found);
-              }
-
-              // Scan head_reborn
-              found = find_pattern_in_memory(task, start, size, pattern_head_reborn, sizeof(pattern_head_reborn));
-              if (found) {
-                  g_state.head_reborn = found;
-                  printf("[Aimlock] Head reborn at: 0x%llx\n", found);
-              }
-
-              // Scan head_sprite
-              found = find_pattern_in_memory(task, start, size, pattern_head_sprite, sizeof(pattern_head_sprite));
-              if (found) {
-                  g_state.head_sprite = found;
-                  printf("[Aimlock] Head sprite at: 0x%llx\n", found);
-              }
-
-              // Scan head_icon
-              found = find_pattern_in_memory(task, start, size, pattern_head_icon, sizeof(pattern_head_icon));
-              if (found) {
-                  g_state.head_icon = found;
-                  printf("[Aimlock] Head icon at: 0x%llx\n", found);
-              }
-
-              // Scan head_texture
-              found = find_pattern_in_memory(task, start, size, pattern_head_texture, sizeof(pattern_head_texture));
-              if (found) {
-                  g_state.head_texture = found;
-                  printf("[Aimlock] Head texture at: 0x%llx\n", found);
-              }
-
-              // Scan head_scale
-              found = find_pattern_in_memory(task, start, size, pattern_head_scale, sizeof(pattern_head_scale));
-              if (found) {
-                  g_state.head_scale = found;
-                  printf("[Aimlock] Head scale at: 0x%llx\n", found);
-              }
-
-              // Scan head_avatar
-              found = find_pattern_in_memory(task, start, size, pattern_head_avatar, sizeof(pattern_head_avatar));
-              if (found) {
-                  g_state.head_avatar = found;
-                  printf("[Aimlock] Head avatar at: 0x%llx\n", found);
-              }
-
-              // Scan head_frame
-              found = find_pattern_in_memory(task, start, size, pattern_head_frame, sizeof(pattern_head_frame));
-              if (found) {
-                  g_state.head_frame = found;
-                  printf("[Aimlock] Head frame at: 0x%llx\n", found);
-              }
-
-              // Scan head_elem
               found = find_pattern_in_memory(task, start, size, pattern_head_elem, sizeof(pattern_head_elem));
               if (found) {
                   g_state.head_elem = found;
                   printf("[Aimlock] Head elem at: 0x%llx\n", found);
               }
 
-              // Scan head_to
-              found = find_pattern_in_memory(task, start, size, pattern_head_to, sizeof(pattern_head_to));
-              if (found) {
-                  g_state.head_to = found;
-                  printf("[Aimlock] Head to at: 0x%llx\n", found);
-              }
-
-              // Scan head_of
-              found = find_pattern_in_memory(task, start, size, pattern_head_of, sizeof(pattern_head_of));
-              if (found) {
-                  g_state.head_of = found;
-                  printf("[Aimlock] Head of at: 0x%llx\n", found);
-              }
-
-              // Scan head_tag
-              found = find_pattern_in_memory(task, start, size, pattern_head_tag, sizeof(pattern_head_tag));
-              if (found) {
-                  g_state.head_tag = found;
-                  printf("[Aimlock] Head tag at: 0x%llx\n", found);
-              }
-
-              // Use static offsets if not found
               if (g_state.head_1 == 0) {
                   g_state.head_1 = get_runtime_address(0x100000000, OFFSET_BONE_HEAD_1);
                   g_state.head_2 = get_runtime_address(0x100000000, OFFSET_BONE_HEAD_2);
@@ -555,20 +382,6 @@ jobs:
                   g_state.head_to = get_runtime_address(0x100000000, OFFSET_HEAD_TO);
                   g_state.head_of = get_runtime_address(0x100000000, OFFSET_HEAD_OF);
                   g_state.head_tag = get_runtime_address(0x100000000, OFFSET_HEAD_TAG);
-                  g_state.head_anim = get_runtime_address(0x100000000, OFFSET_HEAD_ANIM);
-                  g_state.head_reborn = get_runtime_address(0x100000000, OFFSET_HEAD_REBORN);
-                  g_state.head_lights = get_runtime_address(0x100000000, OFFSET_HEAD_LIGHTS);
-                  g_state.head_sprite = get_runtime_address(0x100000000, OFFSET_HEAD_SPRITE);
-                  g_state.head_icon = get_runtime_address(0x100000000, OFFSET_HEAD_ICON);
-                  g_state.head_texture = get_runtime_address(0x100000000, OFFSET_HEAD_TEXTURE);
-                  g_state.head_scale = get_runtime_address(0x100000000, OFFSET_HEAD_SCALE);
-                  g_state.head_avatar = get_runtime_address(0x100000000, OFFSET_HEAD_AVATAR);
-                  g_state.head_frame = get_runtime_address(0x100000000, OFFSET_HEAD_FRAME);
-                  g_state.head_btn_left = get_runtime_address(0x100000000, OFFSET_HEAD_BTN_LEFT);
-                  g_state.head_btn_right = get_runtime_address(0x100000000, OFFSET_HEAD_BTN_RIGHT);
-                  g_state.head_pic_id = get_runtime_address(0x100000000, OFFSET_HEAD_PIC_ID);
-                  g_state.head_pic_data = get_runtime_address(0x100000000, OFFSET_HEAD_PIC_DATA);
-                  g_state.head_pic_item = get_runtime_address(0x100000000, OFFSET_HEAD_PIC_ITEM);
                   printf("[Aimlock] Using static offsets\n");
               }
 
@@ -591,24 +404,16 @@ jobs:
                       pos.y += g_state.aim_y;
                       pos.z += g_state.aim_z;
                       write_memory(task, g_state.head_1, &pos, sizeof(Vector4));
-                      if (g_state.head_2 != 0) {
-                          write_memory(task, g_state.head_2, &pos, sizeof(Vector4));
-                      }
-                      if (g_state.head_3 != 0) {
-                          write_memory(task, g_state.head_3, &pos, sizeof(Vector4));
-                      }
+                      if (g_state.head_2 != 0) write_memory(task, g_state.head_2, &pos, sizeof(Vector4));
+                      if (g_state.head_3 != 0) write_memory(task, g_state.head_3, &pos, sizeof(Vector4));
                   }
               }
 
               if (g_state.headshot_mode && g_state.headshot_1 != 0) {
                   float multiplier = 10.0;
                   write_memory(task, g_state.headshot_1, &multiplier, sizeof(float));
-                  if (g_state.headshot_2 != 0) {
-                      write_memory(task, g_state.headshot_2, &multiplier, sizeof(float));
-                  }
-                  if (g_state.headshot_3 != 0) {
-                      write_memory(task, g_state.headshot_3, &multiplier, sizeof(float));
-                  }
+                  if (g_state.headshot_2 != 0) write_memory(task, g_state.headshot_2, &multiplier, sizeof(float));
+                  if (g_state.headshot_3 != 0) write_memory(task, g_state.headshot_3, &multiplier, sizeof(float));
               }
 
               if (g_state.aim_assist && g_state.high_head != 0) {
@@ -623,83 +428,26 @@ jobs:
 
               g_frame_counter++;
               if (g_frame_counter % 60 == 0) {
-                  update_kill_stats();
-              }
-
-              pthread_mutex_unlock(&g_mutex);
-          }
-
-          void perform_headshot(void) {
-              pthread_mutex_lock(&g_mutex);
-              if (!g_state.initialized) {
-                  pthread_mutex_unlock(&g_mutex);
-                  return;
-              }
-
-              task_t task = mach_task_self();
-              if (g_state.headshot_1 != 0) {
-                  float multiplier = 20.0;
-                  write_memory(task, g_state.headshot_1, &multiplier, sizeof(float));
-                  if (g_state.headshot_2 != 0) {
-                      write_memory(task, g_state.headshot_2, &multiplier, sizeof(float));
+                  if (g_state.head_kill != 0) {
+                      uint32_t kills = 0;
+                      if (read_memory(task, g_state.head_kill, &kills, sizeof(uint32_t)) == KERN_SUCCESS) {
+                          g_state.kill_count = kills;
+                      }
                   }
-                  if (g_state.headshot_3 != 0) {
-                      write_memory(task, g_state.headshot_3, &multiplier, sizeof(float));
-                  }
-              }
-              pthread_mutex_unlock(&g_mutex);
-          }
-
-          void perform_aim_assist(void) {
-              pthread_mutex_lock(&g_mutex);
-              if (!g_state.initialized || !g_state.aim_assist) {
-                  pthread_mutex_unlock(&g_mutex);
-                  return;
-              }
-
-              task_t task = mach_task_self();
-              if (g_state.high_head != 0) {
-                  float assist = 1.5;
-                  write_memory(task, g_state.high_head, &assist, sizeof(float));
-              }
-              pthread_mutex_unlock(&g_mutex);
-          }
-
-          void update_kill_stats(void) {
-              task_t task = mach_task_self();
-              if (g_state.head_kill != 0) {
-                  uint32_t kills = 0;
-                  if (read_memory(task, g_state.head_kill, &kills, sizeof(uint32_t)) == KERN_SUCCESS) {
-                      g_state.kill_count = kills;
-                      if (g_state.headshot_1 != 0) {
-                          uint32_t hs = 0;
-                          if (read_memory(task, g_state.headshot_1, &hs, sizeof(uint32_t)) == KERN_SUCCESS) {
-                              g_state.headshot_count = hs;
-                          }
+                  if (g_state.headshot_1 != 0) {
+                      uint32_t hs = 0;
+                      if (read_memory(task, g_state.headshot_1, &hs, sizeof(uint32_t)) == KERN_SUCCESS) {
+                          g_state.headshot_count = hs;
                       }
                   }
               }
-          }
 
-          void reset_aim_values(void) {
-              pthread_mutex_lock(&g_mutex);
-              g_state.aim_x = 0.0;
-              g_state.aim_y = 0.0;
-              g_state.aim_z = 0.0;
-              g_state.smoothness = 0.5;
               pthread_mutex_unlock(&g_mutex);
-              printf("[Aimlock] Aim values reset\n");
           }
 
           void* aimlock_thread(void* arg) {
               while (1) {
                   perform_aimlock();
-                  if (g_state.headshot_mode) {
-                      perform_headshot();
-                  }
-                  if (g_state.aim_assist) {
-                      perform_aim_assist();
-                  }
                   usleep(16667);
               }
               return NULL;
@@ -710,9 +458,7 @@ jobs:
               g_state.enabled = enable;
               pthread_mutex_unlock(&g_mutex);
               printf("[Aimlock] Aimlock %s\n", enable ? "Enabled" : "Disabled");
-              if (enable && g_state.head_1 == 0) {
-                  scan_all_offsets();
-              }
+              if (enable && g_state.head_1 == 0) scan_all_offsets();
           }
 
           void toggle_headshot_mode(bool enable) {
@@ -736,20 +482,26 @@ jobs:
               printf("[Aimlock] Auto fire %s\n", enable ? "Enabled" : "Disabled");
           }
 
+          void reset_aim_values(void) {
+              pthread_mutex_lock(&g_mutex);
+              g_state.aim_x = 0.0;
+              g_state.aim_y = 0.0;
+              g_state.aim_z = 0.0;
+              pthread_mutex_unlock(&g_mutex);
+              printf("[Aimlock] Aim values reset\n");
+          }
+
           void init_aimlock(void) {
-              if (g_state.initialized) {
-                  return;
-              }
+              if (g_state.initialized) return;
               printf("[Aimlock] Initializing...\n");
               scan_all_offsets();
               pthread_t thread;
               pthread_create(&thread, NULL, aimlock_thread, NULL);
               pthread_detach(thread);
               g_state.initialized = true;
-              printf("[Aimlock] Ready - %zu offsets found\n", sizeof(AimlockState));
+              printf("[Aimlock] Ready\n");
           }
 
-          // Global variables for UI
           float g_aim_x = 0.0;
           float g_aim_y = 0.0;
           float g_aim_z = 0.0;
@@ -770,15 +522,11 @@ jobs:
           cat > src/menu.m << 'EOF'
           #import <UIKit/UIKit.h>
           #import <Foundation/Foundation.h>
-          #import <objc/runtime.h>
-          #import <objc/message.h>
-          #import <CoreGraphics/CoreGraphics.h>
 
           extern void toggle_aimlock(bool enable);
           extern void toggle_headshot_mode(bool enable);
           extern void toggle_aim_assist(bool enable);
           extern void toggle_auto_fire(bool enable);
-          extern void init_aimlock(void);
           extern void reset_aim_values(void);
           extern float g_aim_x;
           extern float g_aim_y;
@@ -788,10 +536,6 @@ jobs:
           static UIView *g_floating_button = nil;
           static UIView *g_menu_view = nil;
           static BOOL g_menu_visible = NO;
-          static BOOL g_aimlock_active = NO;
-          static BOOL g_headshot_active = NO;
-          static BOOL g_aim_assist_active = NO;
-          static BOOL g_auto_fire_active = NO;
 
           @interface MenuViewController : UIViewController
           @property (nonatomic, strong) UISlider *xSlider;
@@ -804,7 +548,6 @@ jobs:
           @property (nonatomic, strong) UIButton *hsBtn;
           @property (nonatomic, strong) UIButton *assistBtn;
           @property (nonatomic, strong) UIButton *fireBtn;
-          @property (nonatomic, strong) UILabel *statsLabel;
           @end
 
           @implementation MenuViewController
@@ -814,7 +557,6 @@ jobs:
               self.view.backgroundColor = [UIColor clearColor];
               [self createFloatingButton];
               [self createMenuView];
-              init_aimlock();
           }
 
           - (void)createFloatingButton {
@@ -847,9 +589,8 @@ jobs:
 
           - (void)createMenuView {
               CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-              CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
 
-              g_menu_view = [[UIView alloc] initWithFrame:CGRectMake(30, 60, screenWidth - 60, 440)];
+              g_menu_view = [[UIView alloc] initWithFrame:CGRectMake(30, 60, screenWidth - 60, 420)];
               g_menu_view.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.95];
               g_menu_view.layer.cornerRadius = 16;
               g_menu_view.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -858,7 +599,6 @@ jobs:
               g_menu_view.layer.shadowRadius = 8;
               g_menu_view.hidden = YES;
 
-              // Title
               UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(20, 12, g_menu_view.frame.size.width - 40, 30)];
               title.text = @"🎯 AIMLOCK PRO";
               title.textColor = [UIColor colorWithRed:0.0 green:0.7 blue:1.0 alpha:1.0];
@@ -866,59 +606,42 @@ jobs:
               title.textAlignment = NSTextAlignmentCenter;
               [g_menu_view addSubview:title];
 
-              // Stats label
-              self.statsLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 44, g_menu_view.frame.size.width - 40, 18)];
-              self.statsLabel.text = @"Kills: 0 | Headshots: 0";
-              self.statsLabel.textColor = [UIColor colorWithWhite:0.7 alpha:1.0];
-              self.statsLabel.font = [UIFont systemFontOfSize:11];
-              self.statsLabel.textAlignment = NSTextAlignmentCenter;
-              [g_menu_view addSubview:self.statsLabel];
-
-              // Aimlock button
               self.aimBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-              self.aimBtn.frame = CGRectMake(20, 70, g_menu_view.frame.size.width - 40, 42);
+              self.aimBtn.frame = CGRectMake(20, 60, g_menu_view.frame.size.width - 40, 42);
               [self.aimBtn setTitle:@"🔴 AIMLOCK: OFF" forState:UIControlStateNormal];
               [self.aimBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
               self.aimBtn.backgroundColor = [UIColor colorWithRed:0.3 green:0.3 blue:0.4 alpha:1.0];
               self.aimBtn.layer.cornerRadius = 10;
-              self.aimBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
               [self.aimBtn addTarget:self action:@selector(toggleAimlock:) forControlEvents:UIControlEventTouchUpInside];
               [g_menu_view addSubview:self.aimBtn];
 
-              // Headshot button
               self.hsBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-              self.hsBtn.frame = CGRectMake(20, 118, g_menu_view.frame.size.width - 40, 38);
+              self.hsBtn.frame = CGRectMake(20, 110, g_menu_view.frame.size.width - 40, 38);
               [self.hsBtn setTitle:@"💀 HEADSHOT: OFF" forState:UIControlStateNormal];
               [self.hsBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
               self.hsBtn.backgroundColor = [UIColor colorWithRed:0.3 green:0.2 blue:0.3 alpha:1.0];
               self.hsBtn.layer.cornerRadius = 10;
-              self.hsBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
               [self.hsBtn addTarget:self action:@selector(toggleHeadshot:) forControlEvents:UIControlEventTouchUpInside];
               [g_menu_view addSubview:self.hsBtn];
 
-              // Aim assist button
               self.assistBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-              self.assistBtn.frame = CGRectMake(20, 162, g_menu_view.frame.size.width - 40, 36);
+              self.assistBtn.frame = CGRectMake(20, 156, g_menu_view.frame.size.width - 40, 36);
               [self.assistBtn setTitle:@"🎯 AIM ASSIST: OFF" forState:UIControlStateNormal];
               [self.assistBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
               self.assistBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.3 blue:0.4 alpha:1.0];
               self.assistBtn.layer.cornerRadius = 10;
-              self.assistBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
               [self.assistBtn addTarget:self action:@selector(toggleAssist:) forControlEvents:UIControlEventTouchUpInside];
               [g_menu_view addSubview:self.assistBtn];
 
-              // Auto fire button
               self.fireBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-              self.fireBtn.frame = CGRectMake(20, 204, g_menu_view.frame.size.width - 40, 36);
+              self.fireBtn.frame = CGRectMake(20, 200, g_menu_view.frame.size.width - 40, 36);
               [self.fireBtn setTitle:@"🔥 AUTO FIRE: OFF" forState:UIControlStateNormal];
               [self.fireBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
               self.fireBtn.backgroundColor = [UIColor colorWithRed:0.4 green:0.2 blue:0.2 alpha:1.0];
               self.fireBtn.layer.cornerRadius = 10;
-              self.fireBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
               [self.fireBtn addTarget:self action:@selector(toggleFire:) forControlEvents:UIControlEventTouchUpInside];
               [g_menu_view addSubview:self.fireBtn];
 
-              // X slider
               UILabel *xlbl = [[UILabel alloc] initWithFrame:CGRectMake(20, 250, 30, 25)];
               xlbl.text = @"X:";
               xlbl.textColor = [UIColor whiteColor];
@@ -929,7 +652,6 @@ jobs:
               self.xSlider.minimumValue = -1.0;
               self.xSlider.maximumValue = 1.0;
               self.xSlider.value = 0.0;
-              self.xSlider.tintColor = [UIColor colorWithRed:0.0 green:0.7 blue:1.0 alpha:1.0];
               [self.xSlider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
               [g_menu_view addSubview:self.xSlider];
 
@@ -939,7 +661,6 @@ jobs:
               self.xValue.font = [UIFont systemFontOfSize:12];
               [g_menu_view addSubview:self.xValue];
 
-              // Y slider
               UILabel *ylbl = [[UILabel alloc] initWithFrame:CGRectMake(20, 280, 30, 25)];
               ylbl.text = @"Y:";
               ylbl.textColor = [UIColor whiteColor];
@@ -950,7 +671,6 @@ jobs:
               self.ySlider.minimumValue = -1.0;
               self.ySlider.maximumValue = 1.0;
               self.ySlider.value = 0.0;
-              self.ySlider.tintColor = [UIColor colorWithRed:0.0 green:0.7 blue:1.0 alpha:1.0];
               [self.ySlider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
               [g_menu_view addSubview:self.ySlider];
 
@@ -960,7 +680,6 @@ jobs:
               self.yValue.font = [UIFont systemFontOfSize:12];
               [g_menu_view addSubview:self.yValue];
 
-              // Z slider
               UILabel *zlbl = [[UILabel alloc] initWithFrame:CGRectMake(20, 310, 30, 25)];
               zlbl.text = @"Z:";
               zlbl.textColor = [UIColor whiteColor];
@@ -971,7 +690,6 @@ jobs:
               self.zSlider.minimumValue = -1.0;
               self.zSlider.maximumValue = 1.0;
               self.zSlider.value = 0.0;
-              self.zSlider.tintColor = [UIColor colorWithRed:0.0 green:0.7 blue:1.0 alpha:1.0];
               [self.zSlider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
               [g_menu_view addSubview:self.zSlider];
 
@@ -981,18 +699,15 @@ jobs:
               self.zValue.font = [UIFont systemFontOfSize:12];
               [g_menu_view addSubview:self.zValue];
 
-              // Reset button
               UIButton *resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-              resetBtn.frame = CGRectMake(20, 348, (g_menu_view.frame.size.width - 50) / 2, 34);
+              resetBtn.frame = CGRectMake(20, 350, (g_menu_view.frame.size.width - 50) / 2, 34);
               [resetBtn setTitle:@"↺ Reset" forState:UIControlStateNormal];
               [resetBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
               resetBtn.backgroundColor = [UIColor colorWithRed:0.4 green:0.3 blue:0.2 alpha:1.0];
               resetBtn.layer.cornerRadius = 8;
-              resetBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
               [resetBtn addTarget:self action:@selector(resetValues) forControlEvents:UIControlEventTouchUpInside];
               [g_menu_view addSubview:resetBtn];
 
-              // Close button
               UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
               closeBtn.frame = CGRectMake(g_menu_view.frame.size.width - 50, 10, 35, 35);
               [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
@@ -1017,31 +732,35 @@ jobs:
           }
 
           - (void)toggleAimlock:(UIButton *)sender {
-              g_aimlock_active = !g_aimlock_active;
-              toggle_aimlock(g_aimlock_active);
-              [sender setTitle:g_aimlock_active ? @"🟢 AIMLOCK: ON" : @"🔴 AIMLOCK: OFF" forState:UIControlStateNormal];
-              sender.backgroundColor = g_aimlock_active ? [UIColor colorWithRed:0.0 green:0.5 blue:0.2 alpha:1.0] : [UIColor colorWithRed:0.3 green:0.3 blue:0.4 alpha:1.0];
+              static BOOL active = NO;
+              active = !active;
+              toggle_aimlock(active);
+              [sender setTitle:active ? @"🟢 AIMLOCK: ON" : @"🔴 AIMLOCK: OFF" forState:UIControlStateNormal];
+              sender.backgroundColor = active ? [UIColor colorWithRed:0.0 green:0.5 blue:0.2 alpha:1.0] : [UIColor colorWithRed:0.3 green:0.3 blue:0.4 alpha:1.0];
           }
 
           - (void)toggleHeadshot:(UIButton *)sender {
-              g_headshot_active = !g_headshot_active;
-              toggle_headshot_mode(g_headshot_active);
-              [sender setTitle:g_headshot_active ? @"💀 HEADSHOT: ON" : @"💀 HEADSHOT: OFF" forState:UIControlStateNormal];
-              sender.backgroundColor = g_headshot_active ? [UIColor colorWithRed:0.5 green:0.0 blue:0.2 alpha:1.0] : [UIColor colorWithRed:0.3 green:0.2 blue:0.3 alpha:1.0];
+              static BOOL active = NO;
+              active = !active;
+              toggle_headshot_mode(active);
+              [sender setTitle:active ? @"💀 HEADSHOT: ON" : @"💀 HEADSHOT: OFF" forState:UIControlStateNormal];
+              sender.backgroundColor = active ? [UIColor colorWithRed:0.5 green:0.0 blue:0.2 alpha:1.0] : [UIColor colorWithRed:0.3 green:0.2 blue:0.3 alpha:1.0];
           }
 
           - (void)toggleAssist:(UIButton *)sender {
-              g_aim_assist_active = !g_aim_assist_active;
-              toggle_aim_assist(g_aim_assist_active);
-              [sender setTitle:g_aim_assist_active ? @"🎯 AIM ASSIST: ON" : @"🎯 AIM ASSIST: OFF" forState:UIControlStateNormal];
-              sender.backgroundColor = g_aim_assist_active ? [UIColor colorWithRed:0.0 green:0.4 blue:0.5 alpha:1.0] : [UIColor colorWithRed:0.2 green:0.3 blue:0.4 alpha:1.0];
+              static BOOL active = NO;
+              active = !active;
+              toggle_aim_assist(active);
+              [sender setTitle:active ? @"🎯 AIM ASSIST: ON" : @"🎯 AIM ASSIST: OFF" forState:UIControlStateNormal];
+              sender.backgroundColor = active ? [UIColor colorWithRed:0.0 green:0.4 blue:0.5 alpha:1.0] : [UIColor colorWithRed:0.2 green:0.3 blue:0.4 alpha:1.0];
           }
 
           - (void)toggleFire:(UIButton *)sender {
-              g_auto_fire_active = !g_auto_fire_active;
-              toggle_auto_fire(g_auto_fire_active);
-              [sender setTitle:g_auto_fire_active ? @"🔥 AUTO FIRE: ON" : @"🔥 AUTO FIRE: OFF" forState:UIControlStateNormal];
-              sender.backgroundColor = g_auto_fire_active ? [UIColor colorWithRed:0.5 green:0.2 blue:0.0 alpha:1.0] : [UIColor colorWithRed:0.4 green:0.2 blue:0.2 alpha:1.0];
+              static BOOL active = NO;
+              active = !active;
+              toggle_auto_fire(active);
+              [sender setTitle:active ? @"🔥 AUTO FIRE: ON" : @"🔥 AUTO FIRE: OFF" forState:UIControlStateNormal];
+              sender.backgroundColor = active ? [UIColor colorWithRed:0.5 green:0.2 blue:0.0 alpha:1.0] : [UIColor colorWithRed:0.4 green:0.2 blue:0.2 alpha:1.0];
           }
 
           - (void)sliderChanged:(UISlider *)sender {
@@ -1155,4 +874,4 @@ jobs:
           path: |
             libaimlock.dylib
             libaimlock.dylib.sha256
-          retention-days: 7 
+          retention-days: 7
