@@ -32,108 +32,98 @@ jobs:
     - name: Tạo file aimbot.c
       run: |
         cat > aimbot.c << 'EOF'
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <dlfcn.h>
-#include <mach/mach.h>
-#include <mach/vm_map.h>
-#include <mach-o/dyld.h>
-#include <CoreGraphics/CoreGraphics.h>
-#include <TargetConditionals.h>
-
-#define OFFSET_BONE_HEAD_1 0x00080BD5
-#define OFFSET_BONE_HEAD_2 0x000A8771
-#define OFFSET_BONE_HEAD_3 0x001D4B8C
-
-typedef struct {
-    float x;
-    float y;
-    float z;
-} Vector3;
-
-static kern_return_t read_memory(mach_port_t task, mach_vm_address_t address, void *buffer, size_t size) {
-    vm_size_t out_size = 0;
-    return vm_read_overwrite(task, address, size, (vm_offset_t)buffer, &out_size);
-}
-
-static kern_return_t write_memory(mach_port_t task, mach_vm_address_t address, const void *buffer, size_t size) {
-    return vm_write(task, address, (vm_offset_t)buffer, size);
-}
-
-static mach_vm_address_t find_module_base(const char *module_name) {
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (strstr(name, module_name) != NULL) {
-            return (mach_vm_address_t)_dyld_get_image_vmaddr_slide(i);
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <unistd.h>
+        #include <dlfcn.h>
+        #include <mach/mach.h>
+        #include <mach/vm_map.h>
+        #include <mach-o/dyld.h>
+        #include <CoreGraphics/CoreGraphics.h>
+        #include <TargetConditionals.h>
+        #define OFFSET_BONE_HEAD_1 0x00080BD5
+        #define OFFSET_BONE_HEAD_2 0x000A8771
+        #define OFFSET_BONE_HEAD_3 0x001D4B8C
+        typedef struct {
+            float x;
+            float y;
+            float z;
+        } Vector3;
+        static kern_return_t read_memory(mach_port_t task, mach_vm_address_t address, void *buffer, size_t size) {
+            vm_size_t out_size = 0;
+            return vm_read_overwrite(task, address, size, (vm_offset_t)buffer, &out_size);
         }
-    }
-    return 0;
-}
-
-static Vector3 read_head_position(mach_port_t task, mach_vm_address_t base_address) {
-    Vector3 head_pos = {0, 0, 0};
-    mach_vm_address_t addr1 = base_address + OFFSET_BONE_HEAD_1;
-    mach_vm_address_t addr2 = base_address + OFFSET_BONE_HEAD_2;
-    mach_vm_address_t addr3 = base_address + OFFSET_BONE_HEAD_3;
-    if (read_memory(task, addr1, &head_pos, sizeof(Vector3)) != KERN_SUCCESS) {
-        if (read_memory(task, addr2, &head_pos, sizeof(Vector3)) != KERN_SUCCESS) {
-            read_memory(task, addr3, &head_pos, sizeof(Vector3));
+        static kern_return_t write_memory(mach_port_t task, mach_vm_address_t address, const void *buffer, size_t size) {
+            return vm_write(task, address, (vm_offset_t)buffer, size);
         }
-    }
-    return head_pos;
-}
-
-static float calculate_head_radius(Vector3 head_pos, Vector3 camera_pos, float fov) {
-    float dx = head_pos.x - camera_pos.x;
-    float dy = head_pos.y - camera_pos.y;
-    float dz = head_pos.z - camera_pos.z;
-    float distance = sqrtf(dx*dx + dy*dy + dz*dz);
-    if (distance < 0.0001f) return 0.5f;
-    return (0.5f / distance) * fov;
-}
-
-static void aimbot_adjust(mach_port_t task, mach_vm_address_t base_address, Vector3 head_pos) {
-    mach_vm_address_t camera_addr = base_address + 0x1000000;
-    Vector3 camera_pos;
-    if (read_memory(task, camera_addr, &camera_pos, sizeof(Vector3)) != KERN_SUCCESS) {
-        return;
-    }
-    Vector3 target_dir;
-    target_dir.x = head_pos.x - camera_pos.x;
-    target_dir.y = head_pos.y - camera_pos.y;
-    target_dir.z = head_pos.z - camera_pos.z;
-    float len = sqrtf(target_dir.x*target_dir.x + target_dir.y*target_dir.y + target_dir.z*target_dir.z);
-    if (len < 0.0001f) return;
-    target_dir.x /= len;
-    target_dir.y /= len;
-    target_dir.z /= len;
-    mach_vm_address_t view_angle_addr = base_address + 0x1001000;
-    float view_angle[2] = {target_dir.x, target_dir.y};
-    write_memory(task, view_angle_addr, view_angle, sizeof(view_angle));
-}
-
-__attribute__((constructor))
-static void initialize_aimbot() {
-    mach_port_t task = mach_task_self();
-    mach_vm_address_t base = find_module_base("FreeFire");
-    if (base == 0) {
-        return;
-    }
-    Vector3 head = read_head_position(task, base);
-    if (head.x == 0 && head.y == 0 && head.z == 0) {
-        return;
-    }
-    aimbot_adjust(task, base, head);
-}
-
-__attribute__((visibility("default")))
-void start_aimbot() {
-    initialize_aimbot();
-}
-EOF
+        static mach_vm_address_t find_module_base(const char *module_name) {
+            uint32_t count = _dyld_image_count();
+            for (uint32_t i = 0; i < count; i++) {
+                const char *name = _dyld_get_image_name(i);
+                if (strstr(name, module_name) != NULL) {
+                    return (mach_vm_address_t)_dyld_get_image_vmaddr_slide(i);
+                }
+            }
+            return 0;
+        }
+        static Vector3 read_head_position(mach_port_t task, mach_vm_address_t base_address) {
+            Vector3 head_pos = {0, 0, 0};
+            mach_vm_address_t addr1 = base_address + OFFSET_BONE_HEAD_1;
+            mach_vm_address_t addr2 = base_address + OFFSET_BONE_HEAD_2;
+            mach_vm_address_t addr3 = base_address + OFFSET_BONE_HEAD_3;
+            if (read_memory(task, addr1, &head_pos, sizeof(Vector3)) != KERN_SUCCESS) {
+                if (read_memory(task, addr2, &head_pos, sizeof(Vector3)) != KERN_SUCCESS) {
+                    read_memory(task, addr3, &head_pos, sizeof(Vector3));
+                }
+            }
+            return head_pos;
+        }
+        static float calculate_head_radius(Vector3 head_pos, Vector3 camera_pos, float fov) {
+            float dx = head_pos.x - camera_pos.x;
+            float dy = head_pos.y - camera_pos.y;
+            float dz = head_pos.z - camera_pos.z;
+            float distance = sqrtf(dx*dx + dy*dy + dz*dz);
+            if (distance < 0.0001f) return 0.5f;
+            return (0.5f / distance) * fov;
+        }
+        static void aimbot_adjust(mach_port_t task, mach_vm_address_t base_address, Vector3 head_pos) {
+            mach_vm_address_t camera_addr = base_address + 0x1000000;
+            Vector3 camera_pos;
+            if (read_memory(task, camera_addr, &camera_pos, sizeof(Vector3)) != KERN_SUCCESS) {
+                return;
+            }
+            Vector3 target_dir;
+            target_dir.x = head_pos.x - camera_pos.x;
+            target_dir.y = head_pos.y - camera_pos.y;
+            target_dir.z = head_pos.z - camera_pos.z;
+            float len = sqrtf(target_dir.x*target_dir.x + target_dir.y*target_dir.y + target_dir.z*target_dir.z);
+            if (len < 0.0001f) return;
+            target_dir.x /= len;
+            target_dir.y /= len;
+            target_dir.z /= len;
+            mach_vm_address_t view_angle_addr = base_address + 0x1001000;
+            float view_angle[2] = {target_dir.x, target_dir.y};
+            write_memory(task, view_angle_addr, view_angle, sizeof(view_angle));
+        }
+        __attribute__((constructor))
+        static void initialize_aimbot() {
+            mach_port_t task = mach_task_self();
+            mach_vm_address_t base = find_module_base("FreeFire");
+            if (base == 0) {
+                return;
+            }
+            Vector3 head = read_head_position(task, base);
+            if (head.x == 0 && head.y == 0 && head.z == 0) {
+                return;
+            }
+            aimbot_adjust(task, base, head);
+        }
+        __attribute__((visibility("default")))
+        void start_aimbot() {
+            initialize_aimbot();
+        }
+        EOF
     - name: Biên dịch aimbot.c thành dylib
       run: |
         mkdir -p build
