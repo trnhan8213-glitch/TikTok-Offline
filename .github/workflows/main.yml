@@ -1,87 +1,698 @@
-name: Build Universal iOS TikTok Dylib (iOS 14 - iOS 27)
+name: Build Aimlock Dylib with Memory Read/Write
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
-  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Kiem tra code nguon
+        uses: actions/checkout@v4
 
-    - name: Setup Advanced Build Environment
-      run: |
-        echo "Configuring environment for modern Xcode and iOS SDK..."
-        xcode-select -p
-        xcrun --sdk iphoneos --show-sdk-path
+      - name: Cai dat Xcode command line tools
+        run: |
+          xcode-select --install || true
+          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+          brew install gcc make cmake ninja
 
-    - name: Generate Objective-C source (code.m)
-      run: |
-        cat << 'EOF' > code.m
-        #import <UIKit/UIKit.h>
-        #import <Foundation/Foundation.h>
+      - name: Tao cau truc thu muc
+        run: |
+          mkdir -p src include
 
-        // Constructor chạy tự động khi dylib được inject
-        __attribute__((constructor)) static void universal_tiktok_offline_ctor(void) {
-            @autoreleasepool {
-                NSString *osVersion = [[UIDevice currentDevice] systemVersion];
-                NSLog(@"[+] TikTok Offline Dylib successfully injected. Running on iOS %@", osVersion);
-                printf("[+] Universal Dylib active on iOS %s\n", [osVersion UTF8String]);
+      - name: Tao file header memory operations
+        run: |
+          cat > include/memory_ops.h << 'EOF'
+          #ifndef MEMORY_OPS_H
+          #define MEMORY_OPS_H
 
-                // Mở rộng logic: Móc vào hệ thống cache mạng (NSURLCache) hoặc xử lý luồng dữ liệu 
-                // để hỗ trợ phát lại video ngoại tuyến từ bộ nhớ đệm cục bộ trên mọi phiên bản iOS.
-            }
-        }
-        EOF
+          #include <mach/mach.h>
+          #include <mach/mach_vm.h>
+          #include <sys/sysctl.h>
+          #include <libproc.h>
+          #include <stdbool.h>
+          #include <stdint.h>
 
-    - name: Compile to Universal iOS dylib (ARM64 / ARM64e)
-      run: |
-        set -e
-        SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-        echo "Using SDK: $SDK"
+          // Cau truc luu thong tin tien trinh
+          typedef struct {
+              pid_t pid;
+              task_t task;
+              mach_vm_address_t base_address;
+              mach_vm_size_t region_size;
+          } GameProcess;
 
-        # Compile arm64
-        clang -isysroot "$SDK" -arch arm64 \
-          -miphoneos-version-min=14.0 \
-          -O3 \
-          -fobjc-arc \
-          -dynamiclib \
-          -framework Foundation \
-          -framework UIKit \
-          -framework CoreGraphics \
-          -o libtiktokoffline-arm64.dylib \
-          code.m
+          // Ham tim PID cua FreeFire
+          pid_t find_freefire_pid(void);
 
-        # Try to compile arm64e; do not fail the whole job if unsupported on runner/Xcode
-        if clang -isysroot "$SDK" -arch arm64e \
-             -miphoneos-version-min=14.0 \
-             -O3 \
-             -fobjc-arc \
-             -dynamiclib \
-             -framework Foundation \
-             -framework UIKit \
-             -framework CoreGraphics \
-             -o libtiktokoffline-arm64e.dylib \
-             code.m; then
-          echo "arm64e build succeeded, creating universal binary..."
-          lipo -create -output libtiktokoffline.dylib libtiktokoffline-arm64.dylib libtiktokoffline-arm64e.dylib
-        else
-          echo "arm64e build failed or not supported; using arm64 only."
-          mv libtiktokoffline-arm64.dylib libtiktokoffline.dylib
-        fi
+          // Ham attach vao task game
+          kern_return_t attach_to_game(GameProcess *game);
 
-        # Check artifact
-        echo "=== BUILD ARTIFACT INFO ==="
-        ls -lh libtiktokoffline.dylib || true
-        file libtiktokoffline.dylib || true
-        lipo -info libtiktokoffline.dylib || true
+          // Ham doc bo nho voi quyen
+          kern_return_t read_memory_with_permission(task_t task, mach_vm_address_t address, void *buffer, mach_vm_size_t size);
 
-    - name: Upload Universal Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: universal-tiktok-offline-dylib
-        path: libtiktokoffline.dylib
+          // Ham ghi bo nho voi quyen
+          kern_return_t write_memory_with_permission(task_t task, mach_vm_address_t address, const void *buffer, mach_vm_size_t size);
+
+          // Ham tim kiem pattern trong bo nho game
+          mach_vm_address_t scan_memory_for_pattern(GameProcess *game, const unsigned char *pattern, size_t pattern_len);
+
+          // Ham lay vung nho cua game
+          kern_return_t get_game_memory_regions(GameProcess *game);
+
+          // Ham tinh offset runtime
+          mach_vm_address_t calculate_runtime_address(GameProcess *game, uint64_t file_offset);
+
+          #endif
+          EOF
+
+      - name: Tao file implementation memory operations
+        run: |
+          cat > src/memory_ops.cpp << 'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include <pthread.h>
+          #include <mach/mach.h>
+          #include <mach/mach_vm.h>
+          #include <mach/vm_map.h>
+          #include <sys/sysctl.h>
+          #include <libproc.h>
+          #include <dlfcn.h>
+          #include <objc/runtime.h>
+          #include <objc/message.h>
+          #include <CoreFoundation/CoreFoundation.h>
+
+          #include "../include/memory_ops.h"
+
+          #define MAX_REGIONS 1024
+          #define PATTERN_SCAN_SIZE 0x10000000
+
+          // Tim PID cua FreeFire
+          pid_t find_freefire_pid(void) {
+              int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+              struct kinfo_proc *procs = NULL;
+              size_t size = 0;
+              
+              if (sysctl(mib, 3, NULL, &size, NULL, 0) < 0) {
+                  return -1;
+              }
+              
+              procs = (struct kinfo_proc*)malloc(size);
+              if (!procs) return -1;
+              
+              if (sysctl(mib, 3, procs, &size, NULL, 0) < 0) {
+                  free(procs);
+                  return -1;
+              }
+              
+              int count = size / sizeof(struct kinfo_proc);
+              pid_t found_pid = -1;
+              
+              for (int i = 0; i < count; i++) {
+                  char *proc_name = procs[i].kp_proc.p_comm;
+                  if (strcmp(proc_name, "FreeFire") == 0 || 
+                      strstr(proc_name, "FreeFire") != NULL ||
+                      strstr(proc_name, "freefire") != NULL) {
+                      found_pid = procs[i].kp_proc.p_pid;
+                      break;
+                  }
+              }
+              
+              free(procs);
+              return found_pid;
+          }
+
+          // Attach vao task game
+          kern_return_t attach_to_game(GameProcess *game) {
+              if (!game) return KERN_INVALID_ARGUMENT;
+              
+              // Tim PID neu chua co
+              if (game->pid <= 0) {
+                  game->pid = find_freefire_pid();
+                  if (game->pid <= 0) {
+                      printf("Khong tim thay tien trinh FreeFire\n");
+                      return KERN_FAILURE;
+                  }
+              }
+              
+              printf("Tim thay FreeFire PID: %d\n", game->pid);
+              
+              // Attach vao task
+              kern_return_t kr = task_for_pid(mach_task_self(), game->pid, &game->task);
+              if (kr != KERN_SUCCESS) {
+                  printf("Khong the attach vao task, error: %d\n", kr);
+                  return kr;
+              }
+              
+              printf("Da attach vao task game thanh cong\n");
+              
+              // Lay thong tin vung nho
+              kr = get_game_memory_regions(game);
+              if (kr != KERN_SUCCESS) {
+                  printf("Khong the lay vung nho game, error: %d\n", kr);
+                  return kr;
+              }
+              
+              return KERN_SUCCESS;
+          }
+
+          // Doc bo nho voi quyen
+          kern_return_t read_memory_with_permission(task_t task, mach_vm_address_t address, void *buffer, mach_vm_size_t size) {
+              mach_vm_size_t out_size = 0;
+              kern_return_t kr = mach_vm_read_overwrite(task, address, size, (vm_address_t)buffer, &out_size);
+              if (kr != KERN_SUCCESS) {
+                  printf("Doc bo nho that bai tai 0x%llx, error: %d\n", address, kr);
+              }
+              return kr;
+          }
+
+          // Ghi bo nho voi quyen
+          kern_return_t write_memory_with_permission(task_t task, mach_vm_address_t address, const void *buffer, mach_vm_size_t size) {
+              // Luu protection cu
+              vm_prot_t old_protection;
+              vm_size_t page_size;
+              host_page_size(mach_host_self(), &page_size);
+              
+              mach_vm_address_t page_start = address & ~(page_size - 1);
+              mach_vm_size_t region_size = size + (address - page_start);
+              
+              // Thay doi protection de cho phep ghi
+              kern_return_t kr = mach_vm_protect(task, page_start, region_size, false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+              if (kr != KERN_SUCCESS) {
+                  printf("Khong the thay doi protection, error: %d\n", kr);
+                  return kr;
+              }
+              
+              // Ghi du lieu
+              kr = mach_vm_write(task, address, (vm_offset_t)buffer, size);
+              if (kr != KERN_SUCCESS) {
+                  printf("Ghi bo nho that bai tai 0x%llx, error: %d\n", address, kr);
+                  // Khoi phuc protection
+                  mach_vm_protect(task, page_start, region_size, false, VM_PROT_READ | VM_PROT_EXECUTE);
+                  return kr;
+              }
+              
+              // Khoi phuc protection
+              kr = mach_vm_protect(task, page_start, region_size, false, VM_PROT_READ | VM_PROT_EXECUTE);
+              if (kr != KERN_SUCCESS) {
+                  printf("Khong the khoi phuc protection, error: %d\n", kr);
+              }
+              
+              printf("Da ghi %zu bytes tai 0x%llx\n", size, address);
+              return KERN_SUCCESS;
+          }
+
+          // Lay vung nho cua game
+          kern_return_t get_game_memory_regions(GameProcess *game) {
+              if (!game || game->task == MACH_PORT_NULL) {
+                  return KERN_INVALID_ARGUMENT;
+              }
+              
+              mach_vm_address_t address = 0;
+              mach_vm_size_t size = 0;
+              vm_region_submap_info_data_64_t info;
+              mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+              natural_t depth = 0;
+              
+              game->base_address = 0;
+              game->region_size = 0;
+              
+              printf("Cac vung nho cua game:\n");
+              
+              while (1) {
+                  kern_return_t kr = mach_vm_region_recurse(
+                      game->task,
+                      &address,
+                      &size,
+                      &depth,
+                      (vm_region_recurse_info_t)&info,
+                      &count
+                  );
+                  
+                  if (kr != KERN_SUCCESS) break;
+                  
+                  // Kiem tra vung nho co quyen doc va ghi
+                  if (info.protection & VM_PROT_READ) {
+                      if (game->base_address == 0) {
+                          game->base_address = address;
+                      }
+                      game->region_size += size;
+                      printf("Vung: 0x%llx - 0x%llx, size: %zu, prot: %d\n", 
+                             address, address + size, size, info.protection);
+                  }
+                  
+                  address += size;
+              }
+              
+              printf("Base address: 0x%llx, Total region size: %zu\n", 
+                     game->base_address, game->region_size);
+              
+              return KERN_SUCCESS;
+          }
+
+          // Tim kiem pattern trong bo nho game
+          mach_vm_address_t scan_memory_for_pattern(GameProcess *game, const unsigned char *pattern, size_t pattern_len) {
+              if (!game || !pattern || pattern_len == 0) {
+                  return 0;
+              }
+              
+              printf("Bat dau quet pattern trong bo nho game...\n");
+              
+              // Quet tung vung nho
+              mach_vm_address_t address = 0;
+              mach_vm_size_t size = 0;
+              vm_region_submap_info_data_64_t info;
+              mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+              natural_t depth = 0;
+              
+              while (1) {
+                  kern_return_t kr = mach_vm_region_recurse(
+                      game->task,
+                      &address,
+                      &size,
+                      &depth,
+                      (vm_region_recurse_info_t)&info,
+                      &count
+                  );
+                  
+                  if (kr != KERN_SUCCESS) break;
+                  
+                  // Chi quet vung co quyen doc
+                  if (info.protection & VM_PROT_READ) {
+                      unsigned char *buffer = (unsigned char*)malloc(size);
+                      if (buffer) {
+                          kr = read_memory_with_permission(game->task, address, buffer, size);
+                          if (kr == KERN_SUCCESS) {
+                              for (mach_vm_address_t i = 0; i <= size - pattern_len; i++) {
+                                  if (memcmp(buffer + i, pattern, pattern_len) == 0) {
+                                      mach_vm_address_t found = address + i;
+                                      printf("Tim thay pattern tai 0x%llx\n", found);
+                                      free(buffer);
+                                      return found;
+                                  }
+                              }
+                          }
+                          free(buffer);
+                      }
+                  }
+                  
+                  address += size;
+              }
+              
+              printf("Khong tim thay pattern trong bo nho\n");
+              return 0;
+          }
+
+          // Tinh offset runtime
+          mach_vm_address_t calculate_runtime_address(GameProcess *game, uint64_t file_offset) {
+              if (!game || game->base_address == 0) {
+                  return 0;
+              }
+              return game->base_address + file_offset;
+          }
+
+          // Ham khoi tao voi quyen memory
+          __attribute__((constructor)) void init_memory_ops() {
+              printf("Memory operations initialized\n");
+          }
+          EOF
+
+      - name: Tao file header aimlock
+        run: |
+          cat > include/aimlock.h << 'EOF'
+          #ifndef AIMLOCK_H
+          #define AIMLOCK_H
+
+          #include <stdbool.h>
+          #include <stdint.h>
+          #include "memory_ops.h"
+
+          // Dinh nghia offset tu data.txt
+          #define OFFSET_BONE_HEAD_1 0x00080BD5
+          #define OFFSET_BONE_HEAD_2 0x000A8771
+          #define OFFSET_BONE_HEAD_3 0x001D4B8C
+          #define OFFSET_BONE_WEIGHT 0x001D4B8C
+
+          // Pattern tim kiem
+          #define BONE_PATTERN_SIZE 30
+          extern const unsigned char bone_pattern[BONE_PATTERN_SIZE];
+
+          // Cau truc aimlock
+          typedef struct {
+              bool enabled;
+              bool is_scanning;
+              mach_vm_address_t head_address_1;
+              mach_vm_address_t head_address_2;
+              mach_vm_address_t head_address_3;
+              mach_vm_address_t weight_address;
+              float aim_x;
+              float aim_y;
+              float aim_z;
+              float smooth_factor;
+          } AimlockState;
+
+          // Ham khoi tao aimlock
+          void init_aimlock(GameProcess *game);
+
+          // Ham bat/tat aimlock
+          void toggle_aimlock(bool enable);
+
+          // Ham thuc hien aimlock
+          void perform_aimlock(void);
+
+          // Ham tim cac offset can thiet
+          void find_aim_offsets(GameProcess *game);
+
+          // Ham ghi aim vao dau dich
+          void write_aim_data(mach_vm_address_t head_address, float x, float y, float z);
+
+          #endif
+          EOF
+
+      - name: Tao file implementation aimlock
+        run: |
+          cat > src/aimlock.cpp << 'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <pthread.h>
+          #include <unistd.h>
+          #include <mach/mach.h>
+          #include <mach/mach_vm.h>
+          #include "../include/aimlock.h"
+          #include "../include/memory_ops.h"
+
+          const unsigned char bone_pattern[BONE_PATTERN_SIZE] = {
+              0x61, 0x6c, 0x63, 0x43, 0x68, 0x61, 0x74, 0x42,
+              0x75, 0x62, 0x62, 0x6c, 0x65, 0x50, 0x6f, 0x73,
+              0x28, 0x29, 0x3a, 0x20, 0x62, 0x6f, 0x6e, 0x65,
+              0x5f, 0x48, 0x65, 0x61, 0x64, 0x20
+          };
+
+          static GameProcess g_game = {0};
+          static AimlockState g_aimlock = {
+              .enabled = false,
+              .is_scanning = false,
+              .head_address_1 = 0,
+              .head_address_2 = 0,
+              .head_address_3 = 0,
+              .weight_address = 0,
+              .aim_x = 0.0,
+              .aim_y = 0.0,
+              .aim_z = 0.0,
+              .smooth_factor = 1.0
+          };
+
+          static bool g_initialized = false;
+          static pthread_mutex_t g_aimlock_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+          // Tim cac offset can thiet
+          void find_aim_offsets(GameProcess *game) {
+              if (!game || game->task == MACH_PORT_NULL) {
+                  return;
+              }
+
+              pthread_mutex_lock(&g_aimlock_mutex);
+              g_aimlock.is_scanning = true;
+              pthread_mutex_unlock(&g_aimlock_mutex);
+
+              printf("Dang tim kiem offset aimlock...\n");
+
+              // Tim pattern bone_Head
+              mach_vm_address_t pattern_addr = scan_memory_for_pattern(game, bone_pattern, BONE_PATTERN_SIZE);
+              
+              if (pattern_addr) {
+                  pthread_mutex_lock(&g_aimlock_mutex);
+                  g_aimlock.head_address_1 = pattern_addr;
+                  g_aimlock.head_address_2 = pattern_addr + 0x2000;
+                  g_aimlock.head_address_3 = pattern_addr + 0x4000;
+                  g_aimlock.weight_address = pattern_addr + 0x6000;
+                  pthread_mutex_unlock(&g_aimlock_mutex);
+                  
+                  printf("Da tim thay head offset tai: 0x%llx\n", pattern_addr);
+              } else {
+                  // Su dung offset co dinh neu khong tim thay
+                  printf("Khong tim thay pattern, su dung offset co dinh\n");
+                  pthread_mutex_lock(&g_aimlock_mutex);
+                  g_aimlock.head_address_1 = calculate_runtime_address(game, OFFSET_BONE_HEAD_1);
+                  g_aimlock.head_address_2 = calculate_runtime_address(game, OFFSET_BONE_HEAD_2);
+                  g_aimlock.head_address_3 = calculate_runtime_address(game, OFFSET_BONE_HEAD_3);
+                  g_aimlock.weight_address = calculate_runtime_address(game, OFFSET_BONE_WEIGHT);
+                  pthread_mutex_unlock(&g_aimlock_mutex);
+              }
+
+              pthread_mutex_lock(&g_aimlock_mutex);
+              g_aimlock.is_scanning = false;
+              pthread_mutex_unlock(&g_aimlock_mutex);
+
+              printf("Head address 1: 0x%llx\n", g_aimlock.head_address_1);
+              printf("Head address 2: 0x%llx\n", g_aimlock.head_address_2);
+              printf("Head address 3: 0x%llx\n", g_aimlock.head_address_3);
+          }
+
+          // Ghi du lieu aim vao dau dich
+          void write_aim_data(mach_vm_address_t head_address, float x, float y, float z) {
+              if (head_address == 0) return;
+
+              // Cau truc du lieu head
+              struct HeadData {
+                  float x;
+                  float y;
+                  float z;
+                  float w;
+              };
+
+              HeadData aim_data;
+              aim_data.x = x;
+              aim_data.y = y;
+              aim_data.z = z;
+              aim_data.w = 1.0;
+
+              // Doc head hien tai
+              HeadData current_head;
+              kern_return_t kr = read_memory_with_permission(g_game.task, head_address, &current_head, sizeof(HeadData));
+              
+              if (kr == KERN_SUCCESS) {
+                  printf("Head hien tai: x=%.2f, y=%.2f, z=%.2f\n", 
+                         current_head.x, current_head.y, current_head.z);
+                  
+                  // Ghi aim moi
+                  kr = write_memory_with_permission(g_game.task, head_address, &aim_data, sizeof(HeadData));
+                  if (kr == KERN_SUCCESS) {
+                      printf("Da ghi aim: x=%.2f, y=%.2f, z=%.2f\n", x, y, z);
+                  }
+              }
+          }
+
+          // Thuc hien aimlock
+          void perform_aimlock(void) {
+              if (!g_initialized) return;
+              
+              pthread_mutex_lock(&g_aimlock_mutex);
+              if (!g_aimlock.enabled || g_aimlock.is_scanning) {
+                  pthread_mutex_unlock(&g_aimlock_mutex);
+                  return;
+              }
+              
+              // Lay thong tin head tu game
+              // O day can tinh toan de ra duoc vi tri head cua dich
+              
+              // Ghi aim vao cac offset head
+              write_aim_data(g_aimlock.head_address_1, g_aimlock.aim_x, g_aimlock.aim_y, g_aimlock.aim_z);
+              write_aim_data(g_aimlock.head_address_2, g_aimlock.aim_x, g_aimlock.aim_y, g_aimlock.aim_z);
+              write_aim_data(g_aimlock.head_address_3, g_aimlock.aim_x, g_aimlock.aim_y, g_aimlock.aim_z);
+              
+              pthread_mutex_unlock(&g_aimlock_mutex);
+          }
+
+          // Thread xu ly aimlock
+          void* aimlock_thread(void* arg) {
+              while (1) {
+                  if (g_initialized) {
+                      perform_aimlock();
+                  }
+                  usleep(16667); // 60fps
+              }
+              return NULL;
+          }
+
+          // Bat/tat aimlock
+          void toggle_aimlock(bool enable) {
+              pthread_mutex_lock(&g_aimlock_mutex);
+              g_aimlock.enabled = enable;
+              pthread_mutex_unlock(&g_aimlock_mutex);
+
+              if (enable) {
+                  printf("Aimlock da duoc bat\n");
+                  // Tim offset neu chua tim
+                  if (g_aimlock.head_address_1 == 0) {
+                      find_aim_offsets(&g_game);
+                  }
+              } else {
+                  printf("Aimlock da duoc tat\n");
+              }
+          }
+
+          // Khoi tao aimlock
+          void init_aimlock(GameProcess *game) {
+              if (g_initialized) return;
+
+              printf("Khoi tao aimlock...\n");
+
+              // Sao chep thong tin game
+              memcpy(&g_game, game, sizeof(GameProcess));
+
+              // Attach vao game neu chua attach
+              if (g_game.task == MACH_PORT_NULL) {
+                  kern_return_t kr = attach_to_game(&g_game);
+                  if (kr != KERN_SUCCESS) {
+                      printf("Khong the attach vao game, error: %d\n", kr);
+                      return;
+                  }
+              }
+
+              // Tim offset
+              find_aim_offsets(&g_game);
+
+              // Tao thread xu ly aimlock
+              pthread_t thread;
+              pthread_create(&thread, NULL, aimlock_thread, NULL);
+              pthread_detach(thread);
+
+              g_initialized = true;
+              printf("Aimlock da san sang\n");
+          }
+
+          // Constructor
+          __attribute__((constructor)) void aimlock_init() {
+              printf("Aimlock dylib loading...\n");
+              
+              // Khoi tao game process
+              memset(&g_game, 0, sizeof(GameProcess));
+              
+              // Tu dong tim game va attach
+              g_game.pid = find_freefire_pid();
+              if (g_game.pid > 0) {
+                  kern_return_t kr = attach_to_game(&g_game);
+                  if (kr == KERN_SUCCESS) {
+                      init_aimlock(&g_game);
+                  }
+              }
+          }
+
+          // Destructor
+          __attribute__((destructor)) void aimlock_deinit() {
+              printf("Aimlock dylib unloading...\n");
+              if (g_game.task != MACH_PORT_NULL) {
+                  mach_port_deallocate(mach_task_self(), g_game.task);
+              }
+          }
+          EOF
+
+      - name: Tao file menu chinh
+        run: |
+          cat > src/menu.cpp << 'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <pthread.h>
+          #include <unistd.h>
+          #include <mach/mach.h>
+          #include <dlfcn.h>
+          #include <objc/runtime.h>
+          #include <objc/message.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <CoreGraphics/CoreGraphics.h>
+
+          #include "../include/aimlock.h"
+          #include "../include/memory_ops.h"
+
+          static bool g_menu_visible = false;
+          static bool g_aimlock_active = false;
+
+          // Callback khi nhan nut aimlock
+          void on_aimlock_button_pressed(void) {
+              g_aimlock_active = !g_aimlock_active;
+              toggle_aimlock(g_aimlock_active);
+              printf("Aimlock button pressed, state: %d\n", g_aimlock_active);
+          }
+
+          // Callback khi nhan nut close
+          void on_close_button_pressed(void) {
+              g_menu_visible = false;
+              printf("Menu closed\n");
+          }
+
+          // Tao menu UI su dung Objective-C runtime
+          void create_menu_ui(void) {
+              // Kiem tra neu da co UI thi khong tao lai
+              // Su dung Objective-C de tao UI
+              // Do khong co UIKit nen su dung CoreGraphics de ve
+              
+              printf("Tao menu UI...\n");
+              
+              // Tao menu bang CoreGraphics
+              // ...
+          }
+
+          // Khoi tao menu
+          void init_menu(void) {
+              printf("Khoi tao menu aimlock...\n");
+              create_menu_ui();
+              
+              // Bat aimlock mac dinh la tat
+              g_aimlock_active = false;
+              toggle_aimlock(false);
+          }
+
+          __attribute__((constructor)) void menu_init() {
+              printf("Menu dylib loaded\n");
+              
+              // Tao thread chay menu
+              pthread_t thread;
+              pthread_create(&thread, NULL, (void*(*)(void*))init_menu, NULL);
+              pthread_detach(thread);
+          }
+          EOF
+
+      - name: Bien dich du an
+        run: |
+          g++ -std=c++17 -fPIC -dynamiclib -Wl,-install_name,@rpath/libaimlockmenu.dylib \
+              -Wall -Wextra -O2 \
+              -framework Foundation -framework CoreFoundation -framework CoreGraphics \
+              -framework IOKit -framework QuartzCore \
+              -o libaimlockmenu.dylib \
+              src/memory_ops.cpp src/aimlock.cpp src/menu.cpp \
+              -I./include \
+              -undefined dynamic_lookup
+
+      - name: Kiem tra file dylib
+        run: |
+          if [ -f "libaimlockmenu.dylib" ]; then
+            echo "Build thanh cong"
+            file libaimlockmenu.dylib
+            otool -L libaimlockmenu.dylib
+            nm -gU libaimlockmenu.dylib | grep -E "(init_aimlock|toggle_aimlock|perform_aimlock|find_freefire_pid|attach_to_game|read_memory_with_permission|write_memory_with_permission)"
+            ls -la libaimlockmenu.dylib
+          else
+            echo "Build that bai"
+            exit 1
+          fi
+
+      - name: Tinh checksum
+        run: |
+          shasum -a 256 libaimlockmenu.dylib > libaimlockmenu.dylib.sha256
+          cat libaimlockmenu.dylib.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libaimlockmenu
+          path: |
+            libaimlockmenu.dylib
+            libaimlockmenu.dylib.sha256
+          retention-days: 7
